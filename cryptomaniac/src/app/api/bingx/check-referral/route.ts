@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createHmac } from 'crypto';
 
 const APIURL = 'https://open-api.bingx.com';
-const APIKEY = process.env.BINGX_API_KEY || '';
-const SECRETKEY = process.env.BINGX_SECRET_KEY || '';
+const APIKEY = process.env.BINGX_API_KEY ?? '';
+const SECRETKEY = process.env.BINGX_SECRET_KEY ?? '';
 
 function getSign(secret: string, payload: string): string {
   return createHmac('sha256', secret).update(payload).digest('hex');
@@ -88,29 +88,48 @@ export async function POST(req: NextRequest) {
     console.log('[BingX] HTTP status:', response.status);
     console.log('[BingX] raw response:', rawText);
 
-    let data: { code: number; msg?: string; data?: unknown };
+    // Parse JSON — any failure is an explicit non-referral
+    let parsed: unknown;
     try {
-      data = JSON.parse(rawText);
+      parsed = JSON.parse(rawText);
     } catch {
       console.error('[BingX] Failed to parse response JSON:', rawText);
       return NextResponse.json({ success: false, message: 'BingX API returned invalid response.' }, { status: 502 });
     }
 
-    console.log('[BingX] parsed code:', data.code, '| msg:', data.msg);
-
-    if (data.code === 0) {
-      return NextResponse.json({ success: true });
-    } else {
-      // Surface the actual BingX error message in dev for easier debugging
-      const devHint = process.env.NODE_ENV !== 'production' ? ` (BingX code: ${data.code}, msg: ${data.msg})` : '';
-      console.warn(`[BingX] UID "${uid}" rejected — code: ${data.code}, msg: ${data.msg}`);
-      return NextResponse.json({
-        success: false,
-        message: `Your UID is not in the list — try again later or text us.${devHint}`,
-      });
+    // Strict runtime validation: parsed must be a plain object
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      console.error('[BingX] Unexpected response shape:', parsed);
+      return NextResponse.json({ success: false, message: 'BingX API returned unexpected response shape.' }, { status: 502 });
     }
+
+    const data = parsed as Record<string, unknown>;
+
+    // Extract code with strict type check — must be the NUMBER 0, nothing else
+    const code = data['code'];
+    console.log('[BingX] parsed code:', code, '(type:', typeof code, ') | msg:', data['msg']);
+
+    // ONLY succeed when code is EXACTLY the number 0
+    // Explicitly reject: undefined, null, "0" (string), false, NaN, any other value
+    const isReferral = typeof code === 'number' && code === 0;
+
+    if (isReferral) {
+      return NextResponse.json({ success: true });
+    }
+
+    // Everything else is a non-referral — log and return false
+    const devHint =
+      process.env.NODE_ENV !== 'production'
+        ? ` (BingX code: ${String(code)}, msg: ${String(data['msg'])})`
+        : '';
+    console.warn(`[BingX] UID "${uid}" rejected — code: ${String(code)}, msg: ${String(data['msg'])}`);
+    return NextResponse.json({
+      success: false,
+      message: `Your UID is not in the list — try again later or text us.${devHint}`,
+    });
   } catch (err) {
     console.error('[BingX] referral check error:', err);
+    // Outer catch NEVER returns success
     return NextResponse.json(
       { success: false, message: 'Internal server error.' },
       { status: 500 }
