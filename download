@@ -1,0 +1,16 @@
+# REPLACE THE VALUES BELOW WITH YOUR ACTUAL KEYS IF NOT AUTOMATICALLY SET
+
+NEXT_PUBLIC_SUPABASE_URL=https://tildxbjejwdijvqtnctj.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRpbGR4YmplandkaWp2cXRuY3RqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQxNzA3OTYsImV4cCI6MjA4OTc0Njc5Nn0.jnb5bJYLXPP0aj4m5ISAfN2giHhd4cJWKC0CdzvANP4
+OPENAI_API_KEY=your-openai-api-key-here
+GEMINI_API_KEY=your-gemini-api-key-here
+ANTHROPIC_API_KEY=your-anthropic-api-key-here
+NEXT_PUBLIC_GA_MEASUREMENT_ID=your-google-analytics-id-here
+NEXT_PUBLIC_ADSENSE_ID=your-adsense-id-here
+PERPLEXITY_API_KEY=your-perplexity-api-key-here
+NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=your-stripe-publishable-key-here
+
+NEXT_PUBLIC_SITE_URL=https://cryptomani6190.builtwithrocket.new
+
+BINGX_API_KEY=SnOOQDiwELC2WIvhzNU8zFrbZ2ul6OrUPQ9s9MGVHv7vOCi6JJb80F0mVsBkxV7NlyoQQ0arb7C1fP6j3Q
+BINGX_SECRET_KEY=RhcxYAQKO9lnMrcg8ZM85ehPEY3sUelrp6oQDYhiEE6dgoclrk4gQNQnqao0iJtyj2fBpn7KaDBaxydxjY2Q
