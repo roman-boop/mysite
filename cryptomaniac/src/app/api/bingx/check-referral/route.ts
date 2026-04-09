@@ -5,57 +5,90 @@ const APIURL = 'https://open-api.bingx.com';
 const APIKEY = process.env.BINGX_API_KEY ?? '';
 const SECRETKEY = process.env.BINGX_SECRET_KEY ?? '';
 
-function getSign(secret: string, payload: string): string {
-  return createHmac('sha256', secret).update(payload).digest('hex');
+function sign(secret: string, queryString: string): string {
+  return createHmac('sha256', secret).update(queryString).digest('hex');
 }
 
 /**
- * Mirrors the Python parseParam() exactly:
- * 1. Sort keys
- * 2. Build paramsList (key=value pairs, no encoding)
- * 3. Append timestamp to paramsStr → used for HMAC signing
- * 4. Build urlParamsList (URL-encode values only if paramsStr contains [ or {)
- * 5. Append timestamp to urlParamsStr → used in the actual URL
+ * Build a signed BingX GET request URL.
+ * BingX signing: sort params alphabetically, join as key=value&...,
+ * append &timestamp=<ms>, then HMAC-SHA256 the whole string.
  */
-function parseParam(paramsMap: Record<string, string>): { paramsStr: string; urlParamsStr: string } {
-  const sortedKeys = Object.keys(paramsMap).sort();
-  const paramsList: string[] = [];
-  const urlParamsList: string[] = [];
+function buildSignedUrl(path: string, params: Record<string, string | number>): string {
+  const timestamp = Date.now();
 
-  for (const key of sortedKeys) {
-    const value = paramsMap[key];
-    paramsList.push(`${key}=${value}`);
+  // Sort keys, build query string WITHOUT timestamp first
+  const sortedKeys = Object.keys(params).sort();
+  const parts = sortedKeys.map((k) => `${k}=${params[k]}`);
+
+  // Append timestamp
+  parts.push(`timestamp=${timestamp}`);
+
+  const queryString = parts.join('&');
+  const signature = sign(SECRETKEY, queryString);
+
+  return `${APIURL}${path}?${queryString}&signature=${signature}`;
+}
+
+/**
+ * Fetch one page of invited users from BingX Agent API.
+ * Endpoint: GET /openApi/agent/v1/account/inviteAccountList
+ * Params: pageNum (1-based), pageSize (max 100)
+ */
+async function fetchInvitedPage(pageNum: number, pageSize: number): Promise<{
+  list: unknown[];
+  total: number;
+}> {
+  const url = buildSignedUrl('/openApi/agent/v1/account/inviteAccountList', {
+    pageNum,
+    pageSize,
+  });
+
+  console.log(`[BingX] Fetching page ${pageNum}, url: ${url}`);
+
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'X-BX-APIKEY': APIKEY,
+    },
+  });
+
+  const rawText = await response.text();
+  console.log(`[BingX] HTTP ${response.status} page ${pageNum}:`, rawText.slice(0, 500));
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    throw new Error(`BingX returned non-JSON: ${rawText.slice(0, 200)}`);
   }
 
-  const timestamp = String(Date.now());
-
-  // paramsStr — used for signing
-  let paramsStr = paramsList.join('&');
-  paramsStr = paramsStr !== '' ? `${paramsStr}&timestamp=${timestamp}` : `timestamp=${timestamp}`;
-
-  // contains check on paramsStr (matches Python)
-  const contains = paramsStr.includes('[') || paramsStr.includes('{');
-
-  for (const key of sortedKeys) {
-    const value = paramsMap[key];
-    if (contains) {
-      urlParamsList.push(`${key}=${encodeURIComponent(String(value))}`);
-    } else {
-      urlParamsList.push(`${key}=${value}`);
-    }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`Unexpected BingX response shape: ${JSON.stringify(parsed).slice(0, 200)}`);
   }
 
-  // urlParamsStr — used in the URL
-  let urlParamsStr = urlParamsList.join('&');
-  urlParamsStr = urlParamsStr !== '' ? `${urlParamsStr}&timestamp=${timestamp}` : `timestamp=${timestamp}`;
+  const root = parsed as Record<string, unknown>;
+  const code = root['code'];
 
-  return { paramsStr, urlParamsStr };
+  if (code !== 0) {
+    throw new Error(`BingX API error — code: ${String(code)}, msg: ${String(root['msg'] ?? root['message'] ?? '')}`);
+  }
+
+  const data = root['data'] as Record<string, unknown> | null;
+  if (!data) {
+    throw new Error('BingX response missing data field');
+  }
+
+  const list = Array.isArray(data['list']) ? (data['list'] as unknown[]) : [];
+  const total = typeof data['total'] === 'number' ? data['total'] : 0;
+
+  return { list, total };
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const uid = typeof body?.uid === 'string' ? body.uid.trim() : '';
+    const uid = typeof body?.uid === 'string' ? body.uid.trim() : String(body?.uid ?? '').trim();
 
     if (!uid) {
       return NextResponse.json({ success: false, message: 'UID is required.' }, { status: 400 });
@@ -66,108 +99,59 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, message: 'BingX API not configured.' }, { status: 500 });
     }
 
-    // Fetch the full invite account list (no uid param needed — returns all referrals)
-    const paramsMap: Record<string, string> = {};
-    const { paramsStr, urlParamsStr } = parseParam(paramsMap);
-    const signature = getSign(SECRETKEY, paramsStr);
-
-    const url = `${APIURL}/openApi/agent/v1/account/inviteAccountList?${urlParamsStr}&signature=${signature}`;
-
-    console.log('[BingX] paramsStr (signed):', paramsStr);
-    console.log('[BingX] urlParamsStr (url):', urlParamsStr);
-    console.log('[BingX] signature:', signature);
-    console.log('[BingX] full URL:', url);
-
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'X-BX-APIKEY': APIKEY,
-      },
-    });
-
-    const rawText = await response.text();
-    console.log('[BingX] HTTP status:', response.status);
-    console.log('[BingX] raw response:', rawText);
-
-    // Parse JSON — any failure is an explicit non-referral
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(rawText);
-    } catch {
-      console.error('[BingX] Failed to parse response JSON:', rawText);
-      return NextResponse.json({ success: false, message: 'BingX API returned invalid response.' }, { status: 502 });
-    }
-
-    // Strict runtime validation: parsed must be a plain object
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      console.error('[BingX] Unexpected response shape:', parsed);
-      return NextResponse.json({ success: false, message: 'BingX API returned unexpected response shape.' }, { status: 502 });
-    }
-
-    const data = parsed as Record<string, unknown>;
-    const code = data['code'];
-
-    console.log('[BingX] parsed code:', code, '(type:', typeof code, ') | msg:', data['msg']);
-
-    // API must return code 0 to proceed
-    if (typeof code !== 'number' || code !== 0) {
-      const devHint =
-        process.env.NODE_ENV !== 'production'
-          ? ` (BingX code: ${String(code)}, msg: ${String(data['msg'])})`
-          : '';
-      console.warn(`[BingX] API error — code: ${String(code)}, msg: ${String(data['msg'])}`);
-      return NextResponse.json({
-        success: false,
-        message: `Your UID is not in the list — try again later or text us.${devHint}`,
-      });
-    }
-
-    // Extract the list from data.data.list
-    const responseData = data['data'];
-    if (typeof responseData !== 'object' || responseData === null || Array.isArray(responseData)) {
-      console.error('[BingX] Unexpected data shape:', responseData);
-      return NextResponse.json({ success: false, message: 'BingX API returned unexpected data shape.' }, { status: 502 });
-    }
-
-    const innerData = responseData as Record<string, unknown>;
-    const list = innerData['list'];
-
-    if (!Array.isArray(list)) {
-      console.error('[BingX] list is not an array:', list);
-      return NextResponse.json({ success: false, message: 'BingX API returned unexpected list shape.' }, { status: 502 });
-    }
-
-    // Check if the entered UID appears in the list
-    // UID can be stored as number or string in the response, so compare both
     const uidNumber = Number(uid);
-    const isReferral = list.some((entry: unknown) => {
+    const PAGE_SIZE = 100;
+
+    // Fetch first page to get total count
+    const firstPage = await fetchInvitedPage(1, PAGE_SIZE);
+    console.log(`[BingX] Total invited users: ${firstPage.total}, first page count: ${firstPage.list.length}`);
+
+    // Check first page
+    const foundOnFirstPage = firstPage.list.some((entry) => {
       if (typeof entry !== 'object' || entry === null) return false;
       const item = entry as Record<string, unknown>;
       const itemUid = item['uid'];
-      // Compare as number or string
       return itemUid === uidNumber || String(itemUid) === uid;
     });
 
-    console.log(`[BingX] UID "${uid}" found in list: ${isReferral} (list length: ${list.length})`);
-
-    if (isReferral) {
+    if (foundOnFirstPage) {
+      console.log(`[BingX] UID "${uid}" found on page 1`);
       return NextResponse.json({ success: true });
     }
 
-    const devHint =
-      process.env.NODE_ENV !== 'production'
-        ? ` (searched ${list.length} entries)`
-        : '';
-    console.warn(`[BingX] UID "${uid}" not found in invite list`);
+    // Paginate through remaining pages if needed
+    const totalPages = Math.ceil(firstPage.total / PAGE_SIZE);
+    for (let page = 2; page <= totalPages; page++) {
+      const { list } = await fetchInvitedPage(page, PAGE_SIZE);
+      const found = list.some((entry) => {
+        if (typeof entry !== 'object' || entry === null) return false;
+        const item = entry as Record<string, unknown>;
+        const itemUid = item['uid'];
+        return itemUid === uidNumber || String(itemUid) === uid;
+      });
+
+      if (found) {
+        console.log(`[BingX] UID "${uid}" found on page ${page}`);
+        return NextResponse.json({ success: true });
+      }
+    }
+
+    console.warn(`[BingX] UID "${uid}" not found in ${firstPage.total} invited users`);
     return NextResponse.json({
       success: false,
-      message: `Your UID is not in the list — try again later or text us.${devHint}`,
+      message: 'Your UID is not in the referral list — contact us if you believe this is an error.',
     });
   } catch (err) {
-    console.error('[BingX] referral check error:', err);
-    // Outer catch NEVER returns success
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[BingX] referral check error:', message);
     return NextResponse.json(
-      { success: false, message: 'Internal server error.' },
+      {
+        success: false,
+        message:
+          process.env.NODE_ENV !== 'production'
+            ? `BingX error: ${message}`
+            : 'Internal server error.',
+      },
       { status: 500 }
     );
   }
