@@ -15,10 +15,30 @@ const PUBLIC_LESSONS = [
   { title: 'AMD модель - одна из самых качественных торговых моделей', duration: '', youtube: 'https://youtu.be/mhOBEYpHL68' },
 ];
 
+function getYouTubeId(url: string): string | null {
+  if (!url) return null;
+  // youtu.be/ID
+  const shortMatch = url.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);
+  if (shortMatch) return shortMatch[1];
+  // youtube.com/watch?v=ID
+  const watchMatch = url.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
+  if (watchMatch) return watchMatch[1];
+  // studio.youtube.com/video/ID/edit
+  const studioMatch = url.match(/\/video\/([a-zA-Z0-9_-]{11})/);
+  if (studioMatch) return studioMatch[1];
+  return null;
+}
+
 function PublicSmartMoneyBlock() {
-  const [expanded, setExpanded] = useState(false);
+  const [activeLesson, setActiveLesson] = useState<number | null>(null);
   const [hoveredLesson, setHoveredLesson] = useState<number | null>(null);
   const accentColor = '#8b5cf6';
+
+  const handleLessonClick = (index: number) => {
+    setActiveLesson(activeLesson === index ? null : index);
+  };
+
+  const activeVideoId = activeLesson !== null ? getYouTubeId(PUBLIC_LESSONS[activeLesson]?.youtube ?? '') : null;
 
   return (
     <section className="py-16 px-6 md:px-12 border-b border-white/[0.06]">
@@ -36,7 +56,8 @@ function PublicSmartMoneyBlock() {
           </p>
         </div>
 
-        <div className="max-w-2xl">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
+          {/* Lesson list */}
           <div className="group relative border border-white/[0.07] bg-[#0a0a0a] hover:bg-[#0f0f0f] transition-all duration-500">
             <div className="h-[2px] w-0 group-hover:w-full transition-all duration-700" style={{ backgroundColor: accentColor }} />
             <div className="p-8">
@@ -53,39 +74,80 @@ function PublicSmartMoneyBlock() {
               </h3>
               <p className="text-sm font-display italic text-zinc-600 mb-4">Думай как институционал.</p>
               <p className="text-sm text-zinc-500 font-light leading-relaxed mb-6">
-                Научитесь читать рынок так, как это делают профессиональные трейдеры и институции. Определяйте зоны ликвидности, лучшие модели входа и освойте основы риск-менеджмента.
+                Научитесь читать рынок так, как это делают профессиональные трейдеры и институции. Нажмите на урок, чтобы посмотреть видео.
               </p>
-              <div className={`space-y-0 overflow-hidden transition-all duration-500 ${expanded ? 'max-h-[400px]' : 'max-h-[200px]'}`}>
-                {PUBLIC_LESSONS?.map((lesson, i) => (
-                  <div
-                    key={i}
-                    className="flex items-center justify-between py-3 border-b border-white/[0.05] cursor-pointer transition-all duration-200"
-                    onMouseEnter={() => setHoveredLesson(i)}
-                    onMouseLeave={() => setHoveredLesson(null)}
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className="text-[10px] font-bold font-mono w-6 transition-colors duration-200" style={{ color: hoveredLesson === i ? accentColor : '#3f3f46' }}>
-                        {String(i + 1)?.padStart(2, '0')}
-                      </span>
-                      <span className="text-sm font-medium transition-all duration-200" style={{ color: hoveredLesson === i ? accentColor : '#a1a1aa', paddingLeft: hoveredLesson === i ? '4px' : '0px' }}>
-                        {lesson?.title}
-                      </span>
+              <div className="space-y-0">
+                {PUBLIC_LESSONS?.map((lesson, i) => {
+                  const isActive = activeLesson === i;
+                  const isHovered = hoveredLesson === i;
+                  return (
+                    <div
+                      key={i}
+                      className="flex items-center justify-between py-3 border-b border-white/[0.05] cursor-pointer transition-all duration-200"
+                      style={{ backgroundColor: isActive ? `${accentColor}10` : 'transparent' }}
+                      onClick={() => handleLessonClick(i)}
+                      onMouseEnter={() => setHoveredLesson(i)}
+                      onMouseLeave={() => setHoveredLesson(null)}
+                    >
+                      <div className="flex items-center gap-3">
+                        <span className="text-[10px] font-bold font-mono w-6 transition-colors duration-200" style={{ color: isActive || isHovered ? accentColor : '#3f3f46' }}>
+                          {String(i + 1)?.padStart(2, '0')}
+                        </span>
+                        <span className="text-sm font-medium transition-all duration-200" style={{ color: isActive ? '#ffffff' : isHovered ? accentColor : '#a1a1aa', paddingLeft: isHovered && !isActive ? '4px' : '0px' }}>
+                          {lesson?.title}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+                        {isActive ? (
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ color: accentColor }}>
+                            <rect x="6" y="4" width="4" height="16" rx="1" fill="currentColor" />
+                            <rect x="14" y="4" width="4" height="16" rx="1" fill="currentColor" />
+                          </svg>
+                        ) : (
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ color: isHovered ? accentColor : '#52525b' }}>
+                            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.5" />
+                            <path d="M10 8l6 4-6 4V8z" fill="currentColor" />
+                          </svg>
+                        )}
+                      </div>
                     </div>
-                    <span className="text-[11px] text-zinc-700 font-mono flex-shrink-0 ml-2">{lesson?.duration}</span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
-              <button
-                onClick={() => setExpanded(!expanded)}
-                className="mt-5 flex items-center gap-2 text-[11px] font-bold uppercase tracking-widest transition-colors duration-200 self-start"
-                style={{ color: expanded ? '#52525b' : accentColor }}
-              >
-                {expanded ? 'Скрыть' : 'Показать все уроки'}
-                <svg width="12" height="12" viewBox="0 0 24 24" className={`transition-transform duration-300 ${expanded ? 'rotate-180' : ''}`}>
-                  <path fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 9l6 6 6-6" />
-                </svg>
-              </button>
             </div>
+          </div>
+
+          {/* YouTube player */}
+          <div className="sticky top-24">
+            {activeVideoId ? (
+              <div className="border border-white/[0.07] bg-[#0a0a0a] overflow-hidden">
+                <div className="h-[2px]" style={{ backgroundColor: accentColor }} />
+                <div className="relative w-full" style={{ paddingBottom: '56.25%' }}>
+                  <iframe
+                    key={activeVideoId}
+                    className="absolute inset-0 w-full h-full"
+                    src={`https://www.youtube.com/embed/${activeVideoId}?autoplay=1&rel=0`}
+                    title={PUBLIC_LESSONS[activeLesson!]?.title}
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                    allowFullScreen
+                  />
+                </div>
+                <div className="p-4">
+                  <p className="text-sm text-white font-medium">{PUBLIC_LESSONS[activeLesson!]?.title}</p>
+                  <p className="text-xs text-zinc-500 mt-1">Урок {(activeLesson ?? 0) + 1} из {PUBLIC_LESSONS.length}</p>
+                </div>
+              </div>
+            ) : (
+              <div className="border border-white/[0.07] bg-[#0a0a0a] flex flex-col items-center justify-center text-center p-12" style={{ minHeight: '300px' }}>
+                <div className="w-14 h-14 rounded-full border border-white/10 flex items-center justify-center mb-4" style={{ backgroundColor: `${accentColor}10` }}>
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" style={{ color: accentColor }}>
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.5" />
+                    <path d="M10 8l6 4-6 4V8z" fill="currentColor" />
+                  </svg>
+                </div>
+                <p className="text-sm text-zinc-400 font-light">Выберите урок слева,<br />чтобы начать просмотр</p>
+              </div>
+            )}
           </div>
         </div>
       </div>
