@@ -26,6 +26,7 @@ interface JournalEntry {
   risk_reward: string;
   result: string;
   note: string;
+  position_type: string;
   trading_models?: TradingModel | null;
 }
 
@@ -38,10 +39,12 @@ interface FilterState {
   risk_reward: string;
   result: string;
   note: string;
+  position_type: string;
 }
 
 const DIRECTIONS = ['long', 'short'];
 const TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d', '3d', '1w', '1M'];
+const POSITION_TYPES = ['swing', 'intraday', 'scalp'];
 
 const emptyEntry = (): Omit<JournalEntry, 'id' | 'trading_models'> => ({
   asset: '',
@@ -52,7 +55,22 @@ const emptyEntry = (): Omit<JournalEntry, 'id' | 'trading_models'> => ({
   risk_reward: '',
   result: '',
   note: '',
+  position_type: '',
 });
+
+// Parse risk/reward string like "1:2" or "1:2.5" → returns the reward number
+function parseRR(rr: string): number | null {
+  const match = rr.trim().match(/^(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)$/);
+  if (match) return parseFloat(match[2]) / parseFloat(match[1]);
+  return null;
+}
+
+// Parse result string like "+2%" or "-1.5%" → returns number
+function parseResult(result: string): number | null {
+  const match = result.trim().match(/^([+-]?\d+(?:\.\d+)?)%?$/);
+  if (match) return parseFloat(match[1]);
+  return null;
+}
 
 export default function JournalPage() {
   const { user, loading } = useAuth();
@@ -63,7 +81,7 @@ export default function JournalPage() {
   const [loadingData, setLoadingData] = useState(true);
   const [filters, setFilters] = useState<FilterState>({
     asset: '', direction: '', timeframe: '', trading_model: '',
-    trade_time: '', risk_reward: '', result: '', note: '',
+    trade_time: '', risk_reward: '', result: '', note: '', position_type: '',
   });
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   const filterRef = useRef<HTMLDivElement>(null);
@@ -72,6 +90,9 @@ export default function JournalPage() {
   const [showModelModal, setShowModelModal] = useState(false);
   const [modelForm, setModelForm] = useState({ name: '', description: '', risk_management: '', stop_loss_targets: '' });
   const [savingModel, setSavingModel] = useState(false);
+
+  // Delete model confirm
+  const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
 
   // Inline editing
   const [editingCell, setEditingCell] = useState<{ rowId: string; col: string } | null>(null);
@@ -137,9 +158,33 @@ export default function JournalPage() {
       (!filters.trade_time || timeStr.includes(filters.trade_time)) &&
       (!filters.risk_reward || e.risk_reward.toLowerCase().includes(filters.risk_reward.toLowerCase())) &&
       (!filters.result || e.result.toLowerCase().includes(filters.result.toLowerCase())) &&
-      (!filters.note || e.note.toLowerCase().includes(filters.note.toLowerCase()))
+      (!filters.note || e.note.toLowerCase().includes(filters.note.toLowerCase())) &&
+      (!filters.position_type || e.position_type === filters.position_type)
     );
   });
+
+  // --- Stats calculations ---
+  const statsEntries = filteredEntries.filter((e) => e.result.trim() !== '');
+  const wins = statsEntries.filter((e) => parseResult(e.result) !== null && (parseResult(e.result) as number) > 0);
+  const losses = statsEntries.filter((e) => parseResult(e.result) !== null && (parseResult(e.result) as number) < 0);
+  const winrate = statsEntries.length > 0 ? (wins.length / statsEntries.length) * 100 : null;
+
+  const totalWin = wins.reduce((sum, e) => sum + Math.abs(parseResult(e.result) || 0), 0);
+  const totalLoss = losses.reduce((sum, e) => sum + Math.abs(parseResult(e.result) || 0), 0);
+  const profitFactor = totalLoss > 0 ? totalWin / totalLoss : totalWin > 0 ? Infinity : null;
+
+  const rrValues = filteredEntries.map((e) => parseRR(e.risk_reward)).filter((v): v is number => v !== null);
+  const avgRR = rrValues.length > 0 ? rrValues.reduce((a, b) => a + b, 0) / rrValues.length : null;
+
+  // Sharpe ratio: mean(returns) / std(returns) — simplified, using result % values
+  const resultValues = statsEntries.map((e) => parseResult(e.result)).filter((v): v is number => v !== null);
+  let sharpeRatio: number | null = null;
+  if (resultValues.length > 1) {
+    const mean = resultValues.reduce((a, b) => a + b, 0) / resultValues.length;
+    const variance = resultValues.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / resultValues.length;
+    const std = Math.sqrt(variance);
+    sharpeRatio = std > 0 ? mean / std : null;
+  }
 
   // Add trading model
   const handleSaveModel = async () => {
@@ -160,6 +205,20 @@ export default function JournalPage() {
       console.error('Failed to save model:', err);
     } finally {
       setSavingModel(false);
+    }
+  };
+
+  // Delete trading model
+  const handleDeleteModel = async (modelId: string) => {
+    if (!user) return;
+    try {
+      await supabase.from('trading_models').delete().eq('id', modelId);
+      setModels((prev) => prev.filter((m) => m.id !== modelId));
+      setEntries((prev) => prev.map((e) => e.trading_model_id === modelId ? { ...e, trading_model_id: null, trading_models: null } : e));
+    } catch (err) {
+      console.error('Failed to delete model:', err);
+    } finally {
+      setDeletingModelId(null);
     }
   };
 
@@ -237,6 +296,7 @@ export default function JournalPage() {
     const rows = filteredEntries.map((e) => ({
       'Актив': e.asset,
       'Направление': e.direction,
+      'Позиция': e.position_type,
       'Таймфрейм': e.timeframe,
       'Торговая модель': e.trading_models?.name || '',
       'Время': e.trade_time ? new Date(e.trade_time).toLocaleString('ru-RU') : '',
@@ -258,6 +318,7 @@ export default function JournalPage() {
   const columns = [
     { key: 'asset', label: 'Актив' },
     { key: 'direction', label: 'Направление' },
+    { key: 'position_type', label: 'Позиция' },
     { key: 'timeframe', label: 'Таймфрейм' },
     { key: 'trading_model_id', label: 'Торговая модель' },
     { key: 'trade_time', label: 'Время' },
@@ -333,7 +394,7 @@ export default function JournalPage() {
 
         {/* Table */}
         <div className="border border-white/10 overflow-x-auto">
-          <table className="w-full text-xs text-white/70 border-collapse min-w-[900px]">
+          <table className="w-full text-xs text-white/70 border-collapse min-w-[1000px]">
             <thead>
               <tr className="border-b border-white/10">
                 {columns.map((col) => (
@@ -362,6 +423,15 @@ export default function JournalPage() {
                           >
                             <option value="">Все</option>
                             {DIRECTIONS.map((d) => <option key={d} value={d}>{d}</option>)}
+                          </select>
+                        ) : col.key === 'position_type' ? (
+                          <select
+                            value={filters.position_type}
+                            onChange={(e) => setFilters((f) => ({ ...f, position_type: e.target.value }))}
+                            className="w-full bg-[#1a1a1a] border border-white/10 text-white/70 text-xs px-2 py-1.5 outline-none"
+                          >
+                            <option value="">Все</option>
+                            {POSITION_TYPES.map((p) => <option key={p} value={p}>{p}</option>)}
                           </select>
                         ) : col.key === 'trading_model_id' ? (
                           <select
@@ -416,6 +486,16 @@ export default function JournalPage() {
                     className="w-full bg-[#111] border border-white/10 text-white/80 text-xs px-1 py-0.5 outline-none"
                   >
                     {DIRECTIONS.map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </td>
+                <td className="px-2 py-2">
+                  <select
+                    value={newRow.position_type}
+                    onChange={(e) => setNewRow((r) => ({ ...r, position_type: e.target.value }))}
+                    className="w-full bg-[#111] border border-white/10 text-white/80 text-xs px-1 py-0.5 outline-none"
+                  >
+                    <option value="">—</option>
+                    {POSITION_TYPES.map((p) => <option key={p} value={p}>{p}</option>)}
                   </select>
                 </td>
                 <td className="px-2 py-2">
@@ -487,11 +567,11 @@ export default function JournalPage() {
               {/* Data rows */}
               {loadingData ? (
                 <tr>
-                  <td colSpan={9} className="text-center py-12 text-white/30 text-xs">Загрузка...</td>
+                  <td colSpan={10} className="text-center py-12 text-white/30 text-xs">Загрузка...</td>
                 </tr>
               ) : filteredEntries.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="text-center py-12 text-white/20 text-xs tracking-widest uppercase">Нет записей</td>
+                  <td colSpan={10} className="text-center py-12 text-white/20 text-xs tracking-widest uppercase">Нет записей</td>
                 </tr>
               ) : (
                 filteredEntries.map((entry) => (
@@ -512,6 +592,19 @@ export default function JournalPage() {
                         </select>
                       ) : (
                         <span className={`text-xs font-bold uppercase tracking-widest ${entry.direction === 'long' ? 'text-emerald-400' : 'text-red-400'}`}>{entry.direction}</span>
+                      )}
+                    </td>
+                    {/* position_type */}
+                    <td className="px-2 py-2 cursor-pointer" onClick={() => startEdit(entry.id, 'position_type', entry.position_type || '')}>
+                      {editingCell?.rowId === entry.id && editingCell.col === 'position_type' ? (
+                        <select autoFocus value={editValue} onChange={(e) => setEditValue(e.target.value)} onBlur={() => handleCellSave(entry, 'position_type')} className="bg-[#111] border border-white/10 text-white text-xs px-1 py-0.5 outline-none">
+                          <option value="">—</option>
+                          {POSITION_TYPES.map((p) => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                      ) : (
+                        <span className={`text-xs font-medium ${entry.position_type === 'swing' ? 'text-blue-400' : entry.position_type === 'intraday' ? 'text-purple-400' : entry.position_type === 'scalp' ? 'text-cyan-400' : 'text-white/20'}`}>
+                          {entry.position_type || '—'}
+                        </span>
                       )}
                     </td>
                     {/* timeframe */}
@@ -579,12 +672,53 @@ export default function JournalPage() {
           </table>
         </div>
 
-        {/* Stats */}
+        {/* Basic stats row */}
         {filteredEntries.length > 0 && (
           <div className="mt-4 flex flex-wrap gap-6 text-[11px] text-white/30 tracking-widest uppercase">
             <span>Всего: <span className="text-white/50">{filteredEntries.length}</span></span>
             <span>Long: <span className="text-emerald-400/60">{filteredEntries.filter((e) => e.direction === 'long').length}</span></span>
             <span>Short: <span className="text-red-400/60">{filteredEntries.filter((e) => e.direction === 'short').length}</span></span>
+          </div>
+        )}
+
+        {/* Advanced stats section */}
+        {statsEntries.length > 0 && (
+          <div className="mt-8">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.3em] text-white/20 mb-4">Статистика</p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-px border border-white/10">
+              {/* Winrate */}
+              <div className="bg-[#0d0d0d] px-5 py-5 border-r border-white/5">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-white/30 mb-2">Winrate</p>
+                <p className={`text-2xl font-light tabular-nums ${winrate !== null && winrate >= 50 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {winrate !== null ? `${winrate.toFixed(1)}%` : '—'}
+                </p>
+                <p className="text-[10px] text-white/20 mt-1">{wins.length}W / {losses.length}L</p>
+              </div>
+              {/* Profit Factor */}
+              <div className="bg-[#0d0d0d] px-5 py-5 border-r border-white/5">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-white/30 mb-2">Profit Factor</p>
+                <p className={`text-2xl font-light tabular-nums ${profitFactor !== null && profitFactor >= 1 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {profitFactor === null ? '—' : profitFactor === Infinity ? '∞' : profitFactor.toFixed(2)}
+                </p>
+                <p className="text-[10px] text-white/20 mt-1">прибыль / убыток</p>
+              </div>
+              {/* Sharpe Ratio */}
+              <div className="bg-[#0d0d0d] px-5 py-5 border-r border-white/5">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-white/30 mb-2">Sharpe Ratio</p>
+                <p className={`text-2xl font-light tabular-nums ${sharpeRatio !== null && sharpeRatio >= 1 ? 'text-emerald-400' : sharpeRatio !== null && sharpeRatio >= 0 ? 'text-amber-400' : 'text-red-400'}`}>
+                  {sharpeRatio !== null ? sharpeRatio.toFixed(2) : '—'}
+                </p>
+                <p className="text-[10px] text-white/20 mt-1">доходность / риск</p>
+              </div>
+              {/* Average R/R */}
+              <div className="bg-[#0d0d0d] px-5 py-5">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-white/30 mb-2">Avg Risk/Reward</p>
+                <p className={`text-2xl font-light tabular-nums ${avgRR !== null && avgRR >= 1 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {avgRR !== null ? `1:${avgRR.toFixed(2)}` : '—'}
+                </p>
+                <p className="text-[10px] text-white/20 mt-1">средний R/R</p>
+              </div>
+            </div>
           </div>
         )}
       </main>
@@ -640,6 +774,35 @@ export default function JournalPage() {
                   className="w-full bg-[#1a1a1a] border border-white/10 text-white text-sm px-3 py-2.5 outline-none focus:border-amber-400/40 placeholder-white/20 transition-colors resize-none"
                 />
               </div>
+
+              {/* Saved models list with delete */}
+              {models.length > 0 && (
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-[0.2em] text-white/40 mb-2">Сохранённые модели</label>
+                  <div className="space-y-1 max-h-40 overflow-y-auto">
+                    {models.map((m) => (
+                      <div key={m.id} className="flex items-center justify-between bg-[#1a1a1a] border border-white/5 px-3 py-2 group">
+                        <span className="text-xs text-white/70 truncate">{m.name}</span>
+                        {deletingModelId === m.id ? (
+                          <div className="flex items-center gap-2 ml-2 shrink-0">
+                            <span className="text-[10px] text-white/40">Удалить?</span>
+                            <button onClick={() => handleDeleteModel(m.id)} className="text-[10px] font-bold text-red-400 hover:text-red-300 transition-colors">Да</button>
+                            <button onClick={() => setDeletingModelId(null)} className="text-[10px] text-white/30 hover:text-white transition-colors">Нет</button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setDeletingModelId(m.id)}
+                            className="opacity-0 group-hover:opacity-100 ml-2 shrink-0 text-red-400/50 hover:text-red-400 transition-all duration-200 text-xs"
+                            title="Удалить модель"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
             <div className="px-6 py-4 border-t border-white/10 flex justify-end gap-3">
               <button onClick={() => setShowModelModal(false)} className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/40 hover:text-white transition-colors px-4 py-2">Отмена</button>
