@@ -10,6 +10,7 @@ const navLinks = [
   { label: 'Home', href: '/homepage' },
   { label: 'Algotrading', href: '/algotrading' },
   { label: 'Learning', href: '/learning' },
+  { label: 'Journal', href: '/journal' },
 ];
 
 export default function Header() {
