@@ -8,9 +8,11 @@ import { useAuth } from '@/contexts/AuthContext';
 import Link from 'next/link';
 
 const PUBLIC_LESSONS = [
-  { title: 'Ликвидность и зоны интереса', duration: '22 мин' },
-  { title: 'Лучшие модели входа', duration: '28 мин' },
-  { title: 'Риск-менеджмент, проп-фирмы и риски', duration: '25 мин' },
+  { title: 'Полная теория для торговли FVG', duration: '', youtube: 'https://studio.youtube.com/video/tAU_QjDon2k/edit' },
+  { title: 'Полная теория по квартальной теории (QT)', duration: '', youtube: 'https://youtu.be/Hdg-rezSoJE' },
+  { title: 'Как работать с контекстом и строить прогнозы по HTF', duration: '', youtube: 'https://youtu.be/2ugI6coDNgk' },
+  { title: 'Как строить трейдинг сценарии', duration: '', youtube: 'https://youtu.be/jgOTQx0ZF4I' },
+  { title: 'AMD модель - одна из самых качественных торговых моделей', duration: '', youtube: 'https://youtu.be/mhOBEYpHL68' },
 ];
 
 function PublicSmartMoneyBlock() {
@@ -229,6 +231,12 @@ export default function LearningPage() {
       {!user ? (
         <section className="py-20 px-6 md:px-12">
           <div className="max-w-7xl mx-auto">
+            <div className="mb-4 flex items-center gap-3">
+              <span className="inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-widest px-3 py-1 border border-amber-400/40 text-amber-400 bg-amber-400/[0.06]">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse inline-block" />
+                В разработке
+              </span>
+            </div>
             <div className="mb-10">
               <div className="flex items-center gap-3 mb-2">
                 <div className="w-8 h-[1px] bg-amber-400/60" />
@@ -261,6 +269,12 @@ export default function LearningPage() {
       ) : !hasAccess ? (
         <section className="py-20 px-6 md:px-12">
           <div className="max-w-7xl mx-auto">
+            <div className="mb-4 flex items-center gap-3">
+              <span className="inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-widest px-3 py-1 border border-amber-400/40 text-amber-400 bg-amber-400/[0.06]">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse inline-block" />
+                В разработке
+              </span>
+            </div>
             <div className="mb-10">
               <div className="flex items-center gap-3 mb-2">
                 <div className="w-8 h-[1px] bg-amber-400/60" />
@@ -286,7 +300,17 @@ export default function LearningPage() {
           </div>
         </section>
       ) : (
-        <LearningGrid />
+        <section className="py-16 px-6 md:px-12">
+          <div className="max-w-7xl mx-auto">
+            <div className="mb-4 flex items-center gap-3">
+              <span className="inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-widest px-3 py-1 border border-amber-400/40 text-amber-400 bg-amber-400/[0.06]">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse inline-block" />
+                В разработке
+              </span>
+            </div>
+          </div>
+          <LearningGrid />
+        </section>
       )}
 
       <Footer />

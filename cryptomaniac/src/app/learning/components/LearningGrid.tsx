@@ -3,81 +3,67 @@ import CurriculumBlock from './CurriculumBlock';
 
 const CURRICULUM = [
   {
-    title: 'Введение в крипту',
+    title: 'Введение в рынок',
     subtitle: 'Начни здесь.',
-    description: 'Всё, что нужно знать перед первой сделкой. Понимание основ криптоэкосистемы: от механики блокчейна до первого кошелька.',
+    description: 'Базовые знания о трейдинге и финансовых рынках. Всё, что нужно знать перед первой сделкой.',
     accentColor: '#f59e0b',
     lessons: [
-      { title: 'Что такое криптовалюта', duration: '12 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Как работает блокчейн', duration: '18 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Виды криптоактивов', duration: '15 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Кошельки и биржи', duration: '20 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Как купить первую крипту', duration: '14 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
+      { title: 'Что такое трейдинг', duration: '' },
+      { title: 'Криптовалютный рынок', duration: '' },
+      { title: 'Валютный и товарный рынки', duration: '' },
+      { title: 'Трейдинг концепции, методы анализа', duration: '' },
     ],
   },
   {
-    title: 'Smart Money Основы',
+    title: 'Smart Money основы',
     subtitle: 'Думай как институционал.',
-    description: 'Научитесь читать рынок так, как это делают профессиональные трейдеры и институции. Определяйте ордер-блоки, зоны ликвидности и структурные сдвиги раньше розничных трейдеров.',
+    description: 'Фундаментальные концепции Smart Money: ликвидность, имбалансы, ордер-блоки и структура рынка.',
     accentColor: '#8b5cf6',
     lessons: [
-      { title: 'Кто такие Smart Money', duration: '16 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Ордер-блоки', duration: '24 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Fair Value Gaps', duration: '19 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Зоны ликвидности', duration: '22 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Break of Structure и Change of Character', duration: '28 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
+      { title: 'Что такое smart money?', duration: '' },
+      { title: 'Ликвидность.', duration: '' },
+      { title: 'FVG, BPR, IFVG - имбалансы.', duration: '' },
+      { title: 'Order-block (ob, bb, stb, bts).', duration: '' },
+      { title: 'Структура', duration: '' },
+      { title: 'Мультитаймфрейм анализ', duration: '' },
     ],
   },
   {
     title: 'Психология трейдинга',
     subtitle: 'Управляй своим разумом.',
-    description: 'Самое недооценённое преимущество в трейдинге. Выстройте психологическую базу, которая отличает прибыльных трейдеров от 95% проигрывающих. Дисциплина — это навык, а не черта характера.',
+    description: 'Психологическая база, которая отличает прибыльных трейдеров. Дисциплина, контроль эмоций и торговый стиль.',
     accentColor: '#06b6d4',
     lessons: [
-      { title: 'Основы психологии трейдинга', duration: '20 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Управление страхом и жадностью', duration: '18 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Построение торговой рутины', duration: '15 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Работа с убытками', duration: '22 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Дисциплина и терпение в трейдинге', duration: '17 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
+      { title: 'Основные ошибки трейдера.', duration: '' },
+      { title: 'FOMO - как избежать?', duration: '' },
+      { title: 'Переработки и овертрейдинг', duration: '' },
+      { title: 'Определение торгового стиля', duration: '' },
     ],
   },
   {
-    title: 'Построение стратегии',
-    subtitle: 'Создай своё преимущество.',
-    description: 'Постройте полноценную торговую стратегию с нуля. Определите каждый вход, выход и параметр риска, чтобы система работала на логике, а не на эмоциях.',
+    title: 'Smart Money advanced',
+    subtitle: 'Следующий уровень.',
+    description: 'Продвинутые концепции: торговые системы, риск-менеджмент, AMD/MMXM модели, квартальная теория и дивергенции.',
     accentColor: '#22c55e',
     lessons: [
-      { title: 'Определение торгового стиля', duration: '16 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Правила входа и выхода', duration: '25 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Соотношение риск/прибыль', duration: '18 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Составление торгового плана', duration: '30 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Комбинирование индикаторов с прайс экшн', duration: '27 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
+      { title: 'Как построить торговую систему?', duration: '' },
+      { title: 'Риск-менеджмент', duration: '' },
+      { title: 'AMD/MMXM модель', duration: '' },
+      { title: 'Работа в ордер-флоу', duration: '' },
+      { title: 'Разворотные модели', duration: '' },
+      { title: 'Квартальная теория', duration: '' },
+      { title: 'SMT, PSP (дивергенции)', duration: '' },
     ],
   },
   {
     title: 'Развитие навыков',
     subtitle: 'Оттачивай мастерство.',
-    description: 'Повысьте скорость исполнения и анализа. От ведения торгового журнала до продвинутого чтения потока ордеров — привычки, которые складываются в долгосрочную прибыльность.',
+    description: 'Журнал сделок, работа над ошибками и бэктесты — привычки, которые складываются в долгосрочную прибыльность.',
     accentColor: '#f97316',
     lessons: [
-      { title: 'Быстрое чтение графиков', duration: '14 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Ведение торгового журнала', duration: '20 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Разбор ошибок', duration: '18 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Адаптация к рыночным условиям', duration: '23 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Продвинутое чтение потока ордеров', duration: '32 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-    ],
-  },
-  {
-    title: 'Бэктестинг',
-    subtitle: 'Проверяй перед риском.',
-    description: 'Докажите, что стратегия работает, прежде чем рисковать реальным капиталом. Изучите методы ручного и автоматического бэктестинга, статистический анализ и оптимизацию стратегий.',
-    accentColor: '#ec4899',
-    lessons: [
-      { title: 'Что такое бэктестинг', duration: '12 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Ручной vs автоматический бэктестинг', duration: '20 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Настройка среды для бэктестинга', duration: '35 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Анализ результатов бэктеста', duration: '28 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      { title: 'Оптимизация стратегии на основе данных', duration: '30 мин', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
+      { title: 'Журнал сделок', duration: '' },
+      { title: 'Работа над ошибками', duration: '' },
+      { title: 'Бектесты', duration: '' },
     ],
   },
 ];
@@ -93,7 +79,7 @@ export default function LearningGrid() {
               <span className="text-[11px] tracking-[0.25em] uppercase text-zinc-500 font-semibold">Программа</span>
             </div>
             <h2 className="font-display text-3xl md:text-4xl text-white font-light">
-              6 модулей <span className="italic text-zinc-500">· 30 уроков</span>
+              5 модулей <span className="italic text-zinc-500">· 24 урока</span>
             </h2>
           </div>
           <div className="hidden md:flex items-center gap-2 text-[11px] text-zinc-600 uppercase tracking-widest">

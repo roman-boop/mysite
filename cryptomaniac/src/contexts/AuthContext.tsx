@@ -78,8 +78,14 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   // Sign Out
   const signOut = async () => {
-    const { error } = await supabase.auth.signOut();
-    if (error) throw error;
+    const { error } = await supabase.auth.signOut({ scope: 'local' });
+    if (error) {
+      console.error('Supabase signOut error:', error);
+      // Clear local state even if server-side sign out failed
+      setUser(null);
+      setSession(null);
+      setProfile(null);
+    }
   };
 
   // Update BingX UID from cabinet — validates via live BingX API referral check
