@@ -66,11 +66,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, message: 'BingX API not configured.' }, { status: 500 });
     }
 
-    const paramsMap: Record<string, string> = { uid };
+    // Fetch the full invite account list (no uid param needed — returns all referrals)
+    const paramsMap: Record<string, string> = {};
     const { paramsStr, urlParamsStr } = parseParam(paramsMap);
     const signature = getSign(SECRETKEY, paramsStr);
 
-    const url = `${APIURL}/openApi/agent/v1/account/inviteRelationCheck?${urlParamsStr}&signature=${signature}`;
+    const url = `${APIURL}/openApi/agent/v1/account/inviteAccountList?${urlParamsStr}&signature=${signature}`;
 
     console.log('[BingX] paramsStr (signed):', paramsStr);
     console.log('[BingX] urlParamsStr (url):', urlParamsStr);
@@ -104,25 +105,60 @@ export async function POST(req: NextRequest) {
     }
 
     const data = parsed as Record<string, unknown>;
-
-    // Extract code with strict type check — must be the NUMBER 0, nothing else
     const code = data['code'];
+
     console.log('[BingX] parsed code:', code, '(type:', typeof code, ') | msg:', data['msg']);
 
-    // ONLY succeed when code is EXACTLY the number 0
-    // Explicitly reject: undefined, null, "0" (string), false, NaN, any other value
-    const isReferral = typeof code === 'number' && code === 0;
+    // API must return code 0 to proceed
+    if (typeof code !== 'number' || code !== 0) {
+      const devHint =
+        process.env.NODE_ENV !== 'production'
+          ? ` (BingX code: ${String(code)}, msg: ${String(data['msg'])})`
+          : '';
+      console.warn(`[BingX] API error — code: ${String(code)}, msg: ${String(data['msg'])}`);
+      return NextResponse.json({
+        success: false,
+        message: `Your UID is not in the list — try again later or text us.${devHint}`,
+      });
+    }
+
+    // Extract the list from data.data.list
+    const responseData = data['data'];
+    if (typeof responseData !== 'object' || responseData === null || Array.isArray(responseData)) {
+      console.error('[BingX] Unexpected data shape:', responseData);
+      return NextResponse.json({ success: false, message: 'BingX API returned unexpected data shape.' }, { status: 502 });
+    }
+
+    const innerData = responseData as Record<string, unknown>;
+    const list = innerData['list'];
+
+    if (!Array.isArray(list)) {
+      console.error('[BingX] list is not an array:', list);
+      return NextResponse.json({ success: false, message: 'BingX API returned unexpected list shape.' }, { status: 502 });
+    }
+
+    // Check if the entered UID appears in the list
+    // UID can be stored as number or string in the response, so compare both
+    const uidNumber = Number(uid);
+    const isReferral = list.some((entry: unknown) => {
+      if (typeof entry !== 'object' || entry === null) return false;
+      const item = entry as Record<string, unknown>;
+      const itemUid = item['uid'];
+      // Compare as number or string
+      return itemUid === uidNumber || String(itemUid) === uid;
+    });
+
+    console.log(`[BingX] UID "${uid}" found in list: ${isReferral} (list length: ${list.length})`);
 
     if (isReferral) {
       return NextResponse.json({ success: true });
     }
 
-    // Everything else is a non-referral — log and return false
     const devHint =
       process.env.NODE_ENV !== 'production'
-        ? ` (BingX code: ${String(code)}, msg: ${String(data['msg'])})`
+        ? ` (searched ${list.length} entries)`
         : '';
-    console.warn(`[BingX] UID "${uid}" rejected — code: ${String(code)}, msg: ${String(data['msg'])}`);
+    console.warn(`[BingX] UID "${uid}" not found in invite list`);
     return NextResponse.json({
       success: false,
       message: `Your UID is not in the list — try again later or text us.${devHint}`,
