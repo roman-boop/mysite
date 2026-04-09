@@ -12,39 +12,53 @@ function sign(secret: string, queryString: string): string {
 /**
  * Build a signed BingX GET request URL.
  * BingX signing: sort params alphabetically, join as key=value&...,
- * append &timestamp=<ms>, then HMAC-SHA256 the whole string.
+ * append timestamp, then HMAC-SHA256 the whole string.
  */
 function buildSignedUrl(path: string, params: Record<string, string | number>): string {
   const timestamp = Date.now();
 
-  // Sort keys, build query string WITHOUT timestamp first
-  const sortedKeys = Object.keys(params).sort();
-  const parts = sortedKeys.map((k) => `${k}=${params[k]}`);
-
-  // Append timestamp
-  parts.push(`timestamp=${timestamp}`);
-
-  const queryString = parts.join('&');
+  const allParams = { ...params, timestamp };
+  const sortedKeys = Object.keys(allParams).sort();
+  const queryString = sortedKeys.map((k) => `${k}=${allParams[k]}`).join('&');
   const signature = sign(SECRETKEY, queryString);
 
   return `${APIURL}${path}?${queryString}&signature=${signature}`;
 }
 
+interface BingXInvitedUser {
+  uid?: number | string;
+  [key: string]: unknown;
+}
+
+interface FetchPageResult {
+  list: BingXInvitedUser[];
+  total: number;
+  hasMore: boolean;
+  lastUid?: number;
+}
+
 /**
  * Fetch one page of invited users from BingX Agent API.
  * Endpoint: GET /openApi/agent/v1/account/inviteAccountList
- * Params: pageNum (1-based), pageSize (max 100)
+ * V3 docs: pageNum (1-based), pageSize (max 100), optional lastUid for cursor pagination
  */
-async function fetchInvitedPage(pageNum: number, pageSize: number): Promise<{
-  list: unknown[];
-  total: number;
-}> {
-  const url = buildSignedUrl('/openApi/agent/v1/account/inviteAccountList', {
+async function fetchInvitedPage(
+  pageNum: number,
+  pageSize: number,
+  lastUid?: number
+): Promise<FetchPageResult> {
+  const params: Record<string, string | number> = {
     pageNum,
     pageSize,
-  });
+  };
 
-  console.log(`[BingX] Fetching page ${pageNum}, url: ${url}`);
+  if (lastUid !== undefined) {
+    params['lastUid'] = lastUid;
+  }
+
+  const url = buildSignedUrl('/openApi/agent/v1/account/inviteAccountList', params);
+
+  console.log(`[BingX] Fetching page ${pageNum}${lastUid ? ` (lastUid=${lastUid})` : ''}`);
 
   const response = await fetch(url, {
     method: 'GET',
@@ -60,7 +74,7 @@ async function fetchInvitedPage(pageNum: number, pageSize: number): Promise<{
   try {
     parsed = JSON.parse(rawText);
   } catch {
-    throw new Error(`BingX returned non-JSON: ${rawText.slice(0, 200)}`);
+    throw new Error(`BingX returned non-JSON (HTTP ${response.status}): ${rawText.slice(0, 300)}`);
   }
 
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
@@ -71,18 +85,36 @@ async function fetchInvitedPage(pageNum: number, pageSize: number): Promise<{
   const code = root['code'];
 
   if (code !== 0) {
-    throw new Error(`BingX API error — code: ${String(code)}, msg: ${String(root['msg'] ?? root['message'] ?? '')}`);
+    const msg = String(root['msg'] ?? root['message'] ?? 'unknown error');
+    throw new Error(`BingX API error — code: ${String(code)}, msg: ${msg}`);
   }
 
-  const data = root['data'] as Record<string, unknown> | null;
+  // data may be null when there are no results
+  const data = root['data'] as Record<string, unknown> | null | undefined;
+
   if (!data) {
-    throw new Error('BingX response missing data field');
+    // No data = empty result set, not an error
+    return { list: [], total: 0, hasMore: false };
   }
 
-  const list = Array.isArray(data['list']) ? (data['list'] as unknown[]) : [];
-  const total = typeof data['total'] === 'number' ? data['total'] : 0;
+  // V3 API may return 'rows' or 'list' depending on version
+  let list: BingXInvitedUser[] = [];
+  if (Array.isArray(data['rows'])) {
+    list = data['rows'] as BingXInvitedUser[];
+  } else if (Array.isArray(data['list'])) {
+    list = data['list'] as BingXInvitedUser[];
+  } else if (Array.isArray(data['data'])) {
+    list = data['data'] as BingXInvitedUser[];
+  }
 
-  return { list, total };
+  const total = typeof data['total'] === 'number' ? data['total'] : list.length;
+  const hasMore = list.length === pageSize;
+
+  // Get last UID for cursor-based pagination (needed when total > 10,000)
+  const lastItem = list[list.length - 1];
+  const lastItemUid = lastItem ? Number(lastItem['uid'] ?? 0) : undefined;
+
+  return { list, total, hasMore, lastUid: lastItemUid };
 }
 
 export async function POST(req: NextRequest) {
@@ -102,37 +134,39 @@ export async function POST(req: NextRequest) {
     const uidNumber = Number(uid);
     const PAGE_SIZE = 100;
 
-    // Fetch first page to get total count
+    const uidMatches = (entry: BingXInvitedUser): boolean => {
+      const itemUid = entry['uid'];
+      return itemUid === uidNumber || String(itemUid) === uid;
+    };
+
+    // Fetch first page
     const firstPage = await fetchInvitedPage(1, PAGE_SIZE);
     console.log(`[BingX] Total invited users: ${firstPage.total}, first page count: ${firstPage.list.length}`);
 
-    // Check first page
-    const foundOnFirstPage = firstPage.list.some((entry) => {
-      if (typeof entry !== 'object' || entry === null) return false;
-      const item = entry as Record<string, unknown>;
-      const itemUid = item['uid'];
-      return itemUid === uidNumber || String(itemUid) === uid;
-    });
-
-    if (foundOnFirstPage) {
+    if (firstPage.list.some(uidMatches)) {
       console.log(`[BingX] UID "${uid}" found on page 1`);
       return NextResponse.json({ success: true });
     }
 
-    // Paginate through remaining pages if needed
+    // Paginate through remaining pages
     const totalPages = Math.ceil(firstPage.total / PAGE_SIZE);
-    for (let page = 2; page <= totalPages; page++) {
-      const { list } = await fetchInvitedPage(page, PAGE_SIZE);
-      const found = list.some((entry) => {
-        if (typeof entry !== 'object' || entry === null) return false;
-        const item = entry as Record<string, unknown>;
-        const itemUid = item['uid'];
-        return itemUid === uidNumber || String(itemUid) === uid;
-      });
+    let lastUid = firstPage.lastUid;
 
-      if (found) {
+    for (let page = 2; page <= totalPages; page++) {
+      // Use cursor (lastUid) when total > 10,000 as required by BingX V3 docs
+      const useLastUid = firstPage.total > 10000 ? lastUid : undefined;
+      const { list, lastUid: newLastUid } = await fetchInvitedPage(page, PAGE_SIZE, useLastUid);
+
+      if (list.some(uidMatches)) {
         console.log(`[BingX] UID "${uid}" found on page ${page}`);
         return NextResponse.json({ success: true });
+      }
+
+      lastUid = newLastUid;
+
+      if (list.length < PAGE_SIZE) {
+        // No more pages
+        break;
       }
     }
 
