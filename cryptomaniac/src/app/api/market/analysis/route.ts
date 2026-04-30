@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 
-const BINANCE_FAPI = 'http://YOUR_SERVER_IP:3000/fapi';
+const PROXY_BASE = 'http://193.151.239.230/api';
+const DIRECT_BASE = 'https://api.binance.com';
 
 const CRYPTO_SYMBOLS = [
   'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT', 'DOTUSDT',
@@ -11,7 +12,6 @@ const CONFIG = {
   vol_low: 0.01,
   vol_high: 0.05,
   trend_thr: 0.02,
-  corr_weight: 0.30,
   adx_period: 14,
   rsi_period: 14,
   fractal_window: 5,
@@ -19,43 +19,73 @@ const CONFIG = {
   lookback_limit: 180,
 };
 
-async function fetchOHLCV(symbol: string, interval = '4h', limit = 180) {
-  const url = `${BINANCE_BASE}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
+// ====================== DATA FETCHING ======================
+
+async function fetchOHLCV(symbol: string) {
+  // Сначала пробуем через твой прокси
+  let url = `${PROXY_BASE}/v3/klines?symbol=${symbol}&interval=4h&limit=${CONFIG.lookback_limit}`;
+
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
     const res = await fetch(url, {
       cache: 'no-store',
       signal: controller.signal,
       headers: { 'Accept': 'application/json' },
     });
+
     clearTimeout(timeout);
-    if (!res.ok) {
-      console.error(`[Market/Analysis] fetchOHLCV HTTP ${res.status} for ${symbol}: ${await res.text().catch(() => '')}`);
-      return null;
+
+    if (res.ok) {
+      const raw: any[][] = await res.json();
+      if (Array.isArray(raw) && raw.length > 30) {
+        return raw.map((c: any[]) => ({
+          open: parseFloat(c[1]),
+          high: parseFloat(c[2]),
+          low: parseFloat(c[3]),
+          close: parseFloat(c[4]),
+          volume: parseFloat(c[5]),
+        }));
+      }
     }
+  } catch (err) {
+    console.warn(`[Market/Analysis] Proxy failed for ${symbol}`);
+  }
+
+  // Fallback — прямой запрос к Binance
+  url = `${DIRECT_BASE}/api/v3/klines?symbol=${symbol}&interval=4h&limit=${CONFIG.lookback_limit}`;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
+    const res = await fetch(url, {
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' },
+    });
+
+    clearTimeout(timeout);
+
+    if (!res.ok) return null;
+
     const raw: any[][] = await res.json();
-    if (!Array.isArray(raw) || raw.length === 0) {
-      console.error(`[Market/Analysis] fetchOHLCV empty response for ${symbol}`);
-      return null;
-    }
-    return raw.map((c) => ({
+    if (!Array.isArray(raw) || raw.length < 30) return null;
+
+    return raw.map((c: any[]) => ({
       open: parseFloat(c[1]),
       high: parseFloat(c[2]),
       low: parseFloat(c[3]),
       close: parseFloat(c[4]),
       volume: parseFloat(c[5]),
     }));
-  } catch (err: any) {
-    clearTimeout(timeout);
-    if (err?.name === 'AbortError') {
-      console.error(`[Market/Analysis] fetchOHLCV timeout for ${symbol}`);
-    } else {
-      console.error(`[Market/Analysis] fetchOHLCV error for ${symbol}:`, err?.message ?? err);
-    }
+  } catch (err) {
+    console.error(`[Market/Analysis] Direct fetch failed for ${symbol}:`, err);
     return null;
   }
 }
+
+// ====================== INDICATOR FUNCTIONS ======================
 
 function calcRSI(closes: number[], period = 14): number {
   if (closes.length < period + 1) return 50;
@@ -77,21 +107,26 @@ function calcADX(candles: { high: number; low: number; close: number }[], period
   const plusDM: number[] = [];
   const minusDM: number[] = [];
   const tr: number[] = [];
+
   for (let i = 1; i < candles.length; i++) {
     const h = candles[i].high, l = candles[i].low, pc = candles[i - 1].close;
     const ph = candles[i - 1].high, pl = candles[i - 1].low;
     const upMove = h - ph;
     const downMove = pl - l;
+
     plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
     minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
     tr.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
   }
+
   const slice = (arr: number[]) => arr.slice(-period);
   const sum = (arr: number[]) => arr.reduce((a, b) => a + b, 0);
+
   const trSum = sum(slice(tr)) || 1e-12;
   const plusDI = (sum(slice(plusDM)) / trSum) * 100;
   const minusDI = (sum(slice(minusDM)) / trSum) * 100;
   const dx = (Math.abs(plusDI - minusDI) / (plusDI + minusDI + 1e-12)) * 100;
+
   return dx;
 }
 
@@ -173,6 +208,7 @@ function assetIndicators(candles: { open: number; high: number; low: number; clo
   if (!candles || candles.length < 30) return null;
   const closes = candles.map((c) => c.close);
   const volumes = candles.map((c) => c.volume);
+
   return {
     roc_24h: calcROC(closes),
     atr_pct: calcATRPct(candles),
@@ -188,15 +224,17 @@ function assetIndicators(candles: { open: number; high: number; low: number; clo
 function aggregate(rows: ReturnType<typeof assetIndicators>[]) {
   const valid = rows.filter(Boolean) as NonNullable<ReturnType<typeof assetIndicators>>[];
   if (valid.length === 0) return null;
+
   const keys = ['roc_24h', 'atr_pct', 'trend_strength', 'volume_ratio', 'rsi', 'adx', 'r2', 'fractal_overlap'] as const;
   const agg: Record<string, number> = {};
+
   for (const k of keys) {
     agg[k] = valid.reduce((sum, r) => sum + (r[k] ?? 0), 0) / valid.length;
   }
   return agg;
 }
 
-function forecast(ind: Record<string, number>): { upward: number; downward: number; consolidation: number } {
+function forecast(ind: Record<string, number>) {
   let up = 1 / 3, down = 1 / 3, cons = 1 / 3;
 
   const roc = ind.roc_24h ?? 0;
@@ -212,7 +250,9 @@ function forecast(ind: Record<string, number>): { upward: number; downward: numb
 
   const adx = ind.adx ?? 0;
   if (adx < 20) cons += 0.15;
-  else if (adx > 25) { if ((ind.trend_strength ?? 0) > 0) up += 0.15; else down += 0.15; }
+  else if (adx > 25) {
+    if ((ind.trend_strength ?? 0) > 0) up += 0.15; else down += 0.15;
+  }
 
   const rsi = ind.rsi ?? 50;
   if (rsi > 60) up += 0.10;
@@ -221,7 +261,9 @@ function forecast(ind: Record<string, number>): { upward: number; downward: numb
 
   const fo = ind.fractal_overlap ?? 1;
   if (fo > 0.7) cons += 0.20;
-  else if (fo < 0.3) { if ((ind.trend_strength ?? 0) > 0) up += 0.20; else down += 0.20; }
+  else if (fo < 0.3) {
+    if ((ind.trend_strength ?? 0) > 0) up += 0.20; else down += 0.20;
+  }
 
   const r2 = ind.r2 ?? 0;
   up *= 0.5 + r2;
@@ -234,7 +276,9 @@ function forecast(ind: Record<string, number>): { upward: number; downward: numb
   }
 
   const total = up + down + cons;
-  if (total > 0) { up /= total; down /= total; cons /= total; }
+  if (total > 0) {
+    up /= total; down /= total; cons /= total;
+  }
 
   return {
     upward: Math.round(up * 1000) / 1000,
@@ -243,42 +287,39 @@ function forecast(ind: Record<string, number>): { upward: number; downward: numb
   };
 }
 
+// ====================== API ROUTE ======================
+
 export async function GET() {
   try {
-    console.log('[Market/Analysis] Starting market analysis fetch for', CRYPTO_SYMBOLS.length, 'symbols');
+    console.log('[Market/Analysis] Starting market analysis...');
 
     const results = await Promise.allSettled(
-      CRYPTO_SYMBOLS.map((sym) => fetchOHLCV(sym, '4h', CONFIG.lookback_limit))
+      CRYPTO_SYMBOLS.map((sym) => fetchOHLCV(sym))
     );
 
-    const successCount = results.filter((r) => r.status === 'fulfilled' && r.value !== null).length;
-    console.log(`[Market/Analysis] Fetched ${successCount}/${CRYPTO_SYMBOLS.length} symbols successfully`);
+    const validCandles = results
+      .filter((r): r is { status: 'fulfilled'; value: any[] } =>
+        r.status === 'fulfilled' && Array.isArray(r.value) && r.value.length > 30
+      )
+      .map(r => r.value);
 
-    if (successCount === 0) {
-      console.error('[Market/Analysis] All symbol fetches failed — Binance API may be unreachable from this server');
+    console.log(`[Market/Analysis] Successfully fetched ${validCandles.length}/${CRYPTO_SYMBOLS.length} symbols`);
+
+    if (validCandles.length === 0) {
       return NextResponse.json(
         { error: 'Failed to fetch market data — Binance API unreachable from server' },
-        { status: 500 }
+        { status: 503 }
       );
     }
 
-    const rows = results.map((r) =>
-      r.status === 'fulfilled' && r.value ? assetIndicators(r.value) : null
-    );
-
+    const rows = validCandles.map(candles => assetIndicators(candles));
     const agg = aggregate(rows);
-    if (!agg) {
-      console.error('[Market/Analysis] aggregate() returned null — insufficient candle data from all symbols');
-      return NextResponse.json(
-        { error: 'Failed to fetch market data — insufficient candle data' },
-        { status: 500 }
-      );
-    }
 
-    console.log('[Market/Analysis] Aggregated indicators:', JSON.stringify(agg));
+    if (!agg) {
+      return NextResponse.json({ error: 'Insufficient data' }, { status: 500 });
+    }
 
     const probs = forecast(agg);
-    console.log('[Market/Analysis] Forecast probabilities:', JSON.stringify(probs));
 
     let condition: string;
     if (probs.upward > 0.5) condition = 'BULLISH';
@@ -294,12 +335,15 @@ export async function GET() {
         fractal_overlap: Math.round((agg.fractal_overlap ?? 0) * 100) / 100,
         r2: Math.round((agg.r2 ?? 0) * 1000) / 1000,
         volume_ratio: Math.round((agg.volume_ratio ?? 0) * 100) / 100,
+        trend_strength: Math.round((agg.trend_strength ?? 0) * 1000) / 1000,
       },
       condition,
+      fetched_symbols: validCandles.length,
       timestamp: new Date().toISOString(),
     });
+
   } catch (err: any) {
-    console.error('[Market/Analysis] GET handler fatal error:', err?.message ?? err, err?.stack ?? '');
-    return NextResponse.json({ error: `Internal server error: ${err?.message ?? 'unknown'}` }, { status: 500 });
+    console.error('[Market/Analysis] Fatal error:', err?.message ?? err);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
