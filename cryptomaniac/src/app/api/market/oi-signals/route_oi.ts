@@ -1,26 +1,23 @@
 import { NextResponse } from 'next/server';
 
-const BINANCE_FAPI = 'https://fapi.binance.com'; // ← прямой публичный эндпоинт
+const BINANCE_FAPI = 'http://193.151.239.230/fapi';   // ← твой прокси
 
 const CONFIG = {
   oi_4h_threshold: 8.0,
   oi_24h_threshold: 12.0,
   price_oi_ratio: 0.4,
   min_oi_usdt: 5_000_000,
-  max_symbols: 180,        // уменьшил, чтобы не таймаутить
-  batch_size: 15,          // меньше параллельности
-  request_delay_ms: 30,    // защита от rate limit
+  max_symbols: 180,
+  batch_size: 12,
+  request_delay_ms: 40,
 };
 
-async function binanceGet(endpoint: string, params: Record<string, any> = {}) {
-  const qs = new URLSearchParams(
-    Object.entries(params).map(([k, v]) => [k, String(v)])
-  ).toString();
-
+async function binanceGet(endpoint: string, params: Record<string, string | number> = {}) {
+  const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
   const url = `${BINANCE_FAPI}${endpoint}${qs ? '?' + qs : ''}`;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => controller.abort(), 9000);
 
   try {
     const res = await fetch(url, {
@@ -28,22 +25,19 @@ async function binanceGet(endpoint: string, params: Record<string, any> = {}) {
       signal: controller.signal,
       headers: { 
         'Accept': 'application/json',
-        'User-Agent': 'CryptoManiac-MarketMonitor/1.0' 
+        'User-Agent': 'CryptoManiac-MarketMonitor/1.0'
       },
     });
 
     clearTimeout(timeout);
 
     if (!res.ok) {
-      if (res.status === 451) {
-        console.error(`[Market/OI] Binance 451 Restricted Access — IP blocked`);
-      }
       const body = await res.text().catch(() => '');
-      console.error(`[Market/OI] HTTP ${res.status} ${endpoint}: ${body.slice(0, 300)}`);
+      console.error(`[Market/OI] HTTP ${res.status} for ${endpoint}: ${body.slice(0, 200)}`);
       return null;
     }
 
-    return await res.json();
+    return res.json();
   } catch (err: any) {
     clearTimeout(timeout);
     console.error(`[Market/OI] Fetch error ${endpoint}:`, err?.message || err);
@@ -52,20 +46,25 @@ async function binanceGet(endpoint: string, params: Record<string, any> = {}) {
 }
 
 async function getSymbols(): Promise<string[]> {
+  console.log('[Market/OI] Fetching symbols from Binance...');
   const data = await binanceGet('/fapi/v1/exchangeInfo');
-  if (!data?.symbols) return [];
+  
+  if (!data || !data.symbols) {
+    console.error('[Market/OI] getSymbols: No data or symbols field');
+    return [];
+  }
 
-  return data.symbols
-    .filter((s: any) => 
-      s.contractType === 'PERPETUAL' && 
-      s.quoteAsset === 'USDT' && 
-      s.status === 'TRADING'
-    )
+  const symbols = data.symbols
+    .filter((s: any) => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT' && s.status === 'TRADING')
     .map((s: any) => s.symbol);
+
+  console.log(`[Market/OI] Found ${symbols.length} USDT perpetual symbols`);
+  return symbols;
 }
 
 function pct(now: number, past: number): number {
-  return past === 0 ? 0 : ((now - past) / past) * 100;
+  if (past === 0) return 0;
+  return ((now - past) / past) * 100;
 }
 
 async function checkSymbol(symbol: string) {
@@ -111,17 +110,23 @@ async function checkSymbol(symbol: string) {
       price_now: priceNow,
       oi_now: Math.round(oiNow),
     };
-  } catch (err) {
-    console.error(`[Market/OI] checkSymbol ${symbol} error:`, err);
+  } catch (err: any) {
+    console.error(`[Market/OI] checkSymbol ${symbol} error:`, err?.message);
     return null;
   }
 }
+
+// ====================== MAIN ROUTE ======================
 
 export async function GET() {
   try {
     const symbols = await getSymbols();
     if (!symbols.length) {
-      return NextResponse.json({ signals: [], error: 'No symbols' }, { status: 503 });
+      return NextResponse.json({ 
+        signals: [], 
+        scanned: 0, 
+        error: 'No symbols from Binance' 
+      });
     }
 
     const start = Date.now();
@@ -129,36 +134,43 @@ export async function GET() {
     const batchSize = CONFIG.batch_size;
     const maxSymbols = Math.min(symbols.length, CONFIG.max_symbols);
 
+    console.log(`[Market/OI] Scanning ${maxSymbols} symbols in batches of ${batchSize}`);
+
     for (let i = 0; i < maxSymbols; i += batchSize) {
       const batch = symbols.slice(i, i + batchSize);
       
-      const batchResults = await Promise.allSettled(
-        batch.map(s => checkSymbol(s))
-      );
+      const batchResults = await Promise.allSettled(batch.map(checkSymbol));
 
       for (const r of batchResults) {
-        if (r.status === 'fulfilled' && r.value) results.push(r.value);
+        if (r.status === 'fulfilled' && r.value) {
+          results.push(r.value);
+        }
       }
 
-      // Небольшая задержка между батчами
+      // Задержка между батчами для снижения нагрузки
       if (i + batchSize < maxSymbols) {
-        await new Promise(res => setTimeout(res, CONFIG.request_delay_ms));
+        await new Promise(resolve => setTimeout(resolve, CONFIG.request_delay_ms));
       }
     }
 
     results.sort((a, b) => 
-      Math.max(b.oi_growth_4h, b.oi_growth_24h) - Math.max(a.oi_growth_4h, a.oi_growth_24h)
+      Math.max(b.oi_growth_4h || 0, b.oi_growth_24h || 0) - 
+      Math.max(a.oi_growth_4h || 0, a.oi_growth_24h || 0)
     );
+
+    const elapsed = Date.now() - start;
+
+    console.log(`[Market/OI] Scan complete: ${results.length} signals found in ${elapsed}ms`);
 
     return NextResponse.json({
       signals: results.slice(0, 15),
       scanned: maxSymbols,
-      elapsed_ms: Date.now() - start,
+      elapsed_ms: elapsed,
       timestamp: new Date().toISOString(),
     });
 
   } catch (err: any) {
-    console.error('[Market/OI] Fatal:', err);
-    return NextResponse.json({ error: 'Internal error' }, { status: 500 });
+    console.error('[Market/OI] Fatal error:', err?.message ?? err);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
