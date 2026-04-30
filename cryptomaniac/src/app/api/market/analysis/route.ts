@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-const BINANCE_BASE = 'https://api.binance.com';
+const BINANCE_FAPI = 'http://YOUR_SERVER_IP:3000/fapi';
 
 const CRYPTO_SYMBOLS = [
   'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT', 'DOTUSDT',
