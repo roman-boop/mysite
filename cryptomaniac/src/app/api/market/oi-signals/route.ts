@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-const BINANCE_FAPI = 'http://193.151.239.230:3000/fapi';
+const BINANCE_FAPI = 'http://193.151.239.230/fapi';
 
 const CONFIG = {
   oi_4h_threshold: 8.0,
