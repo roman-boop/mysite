@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "name": "crypto-maniac",
+  
+  "functions": {
+    "app/api/market/analysis/route.ts": {
+      "maxDuration": 25
+    },
+    "app/api/market/oi-signals/route.ts": {
+      "maxDuration": 30
+    },
+    "app/api/market/funding-signals/route.ts": {
+      "maxDuration": 25
+    }
+  },
+
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, max-age=0" }
+      ]
+    }
+  ],
+
+  "rewrites": [
+    { "source": "/api/market/analysis", "destination": "/api/market/analysis" },
+    { "source": "/api/market/oi-signals", "destination": "/api/market/oi-signals" },
+    { "source": "/api/market/funding-signals", "destination": "/api/market/funding-signals" }
+  ]
+}
