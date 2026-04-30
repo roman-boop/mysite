@@ -12,12 +12,12 @@ const CONFIG = {
   batch_size: 8,
 };
 
-// Кэширование для уменьшения количества запросов
+// Кэширование
 let oiCache: {
   data: any;
   timestamp: number;
 } | null = null;
-const CACHE_TTL = 60 * 1000; // 60 секунд кэша
+const CACHE_TTL = 60 * 1000;
 
 async function bingxGet(endpoint: string, params: any = {}) {
   const qs = new URLSearchParams(params).toString();
@@ -39,7 +39,6 @@ async function bingxGet(endpoint: string, params: any = {}) {
     
     const data = await res.json();
     
-    // Проверка ответа BingX
     if (data.code !== 0) {
       console.error(`BingX API error code: ${data.code}, msg: ${data.msg}`);
       return null;
@@ -53,7 +52,6 @@ async function bingxGet(endpoint: string, params: any = {}) {
 }
 
 async function getAllSymbols() {
-  // Получаем все контракты с BingX
   const data = await bingxGet('/openApi/swap/v2/quote/contracts');
   
   if (!data || !data.data) {
@@ -61,7 +59,6 @@ async function getAllSymbols() {
     return [];
   }
   
-  // Фильтруем только USDT-контракты
   const symbols = data.data
     .filter((contract: any) => contract.symbol.endsWith('USDT'))
     .map((contract: any) => contract.symbol);
@@ -71,7 +68,6 @@ async function getAllSymbols() {
 }
 
 async function getOpenInterest(symbol: string) {
-  // Получаем open interest для конкретного символа
   const data = await bingxGet('/openApi/swap/v2/quote/openInterest', { symbol });
   
   if (!data || !data.data) {
@@ -80,53 +76,8 @@ async function getOpenInterest(symbol: string) {
   
   return {
     symbol: symbol,
-    openInterest: parseFloat(data.data.openInterest),
-    timestamp: data.data.timestamp,
-  };
-}
-
-async function get24hChange(symbol: string) {
-  // Получаем 24-часовые изменения для расчета OI change
-  const data = await bingxGet('/openApi/swap/v2/quote/ticker', { symbol });
-  
-  if (!data || !data.data) {
-    return null;
-  }
-  
-  const ticker = data.data;
-  const currentOI = parseFloat(ticker.openInterest || '0');
-  const volume24h = parseFloat(ticker.volume || '0');
-  const priceChangePercent = parseFloat(ticker.priceChangePercent || '0');
-  
-  // Для расчета изменения OI нам нужны исторические данные
-  // BingX не предоставляет прямого эндпоинта для исторического OI
-  // Поэтому используем volume как прокси-метрику или возвращаем null
-  
-  return {
-    currentOI,
-    volume24h,
-    priceChangePercent,
-    // TODO: Для точного OI change нужна история
-  };
-}
-
-// Альтернативный метод: получаем OI через klines
-async function getOpenInterestFromKlines(symbol: string) {
-  // Некоторые биржи предоставляют OI в данных по фандингу
-  const data = await bingxGet('/openApi/swap/v2/quote/premiumIndex', { symbol });
-  
-  if (!data || !data.data) {
-    return null;
-  }
-  
-  const premiumData = data.data[0] || data.data;
-  // OI не всегда доступен в этом эндпоинте
-  
-  return {
-    symbol,
-    openInterest: premiumData.openInterest ? parseFloat(premiumData.openInterest) : null,
-    fundingRate: premiumData.lastFundingRate ? parseFloat(premiumData.lastFundingRate) : null,
-    markPrice: premiumData.markPrice ? parseFloat(premiumData.markPrice) : null,
+    openInterest: parseFloat(data.data.openInterest || '0'),
+    timestamp: data.data.timestamp || Date.now(),
   };
 }
 
@@ -137,34 +88,24 @@ async function calculateOISignals() {
     throw new Error('No symbols fetched from BingX');
   }
   
-  // Ограничиваем количество символов для обработки
   const symbolsToProcess = symbols.slice(0, CONFIG.max_symbols);
   const signals = [];
   
   console.log(`Processing ${symbolsToProcess.length} symbols...`);
   
-  // Обрабатываем пачками для избежания rate limit
   for (let i = 0; i < symbolsToProcess.length; i += CONFIG.batch_size) {
     const batch = symbolsToProcess.slice(i, i + CONFIG.batch_size);
     
     const batchPromises = batch.map(async (symbol) => {
       try {
-        // Пытаемся получить OI несколькими способами
+        // Получаем OI
         let oiData = await getOpenInterest(symbol);
         
-        if (!oiData || oiData.openInterest === 0) {
-          // Fallback на klines/premium index
-          const fallbackData = await getOpenInterestFromKlines(symbol);
-          if (fallbackData && fallbackData.openInterest) {
-            oiData = fallbackData as any;
-          }
+        if (!oiData || oiData.openInterest === 0 || oiData.openInterest < CONFIG.min_oi_usdt) {
+          return null;
         }
         
-        if (!oiData || !oiData.openInterest || oiData.openInterest < CONFIG.min_oi_usdt) {
-          return null; // Пропускаем символы с низким OI
-        }
-        
-        // Получаем дополнительные данные
+        // Получаем ticker данные
         const tickerData = await bingxGet('/openApi/swap/v2/quote/ticker', { symbol });
         
         if (!tickerData || !tickerData.data) {
@@ -172,50 +113,71 @@ async function calculateOISignals() {
         }
         
         const ticker = tickerData.data;
-        const currentPrice = parseFloat(ticker.lastPrice);
-        const volume24h = parseFloat(ticker.volume);
-        const priceChange24h = parseFloat(ticker.priceChangePercent);
         
-        // Для расчета процентного изменения OI, используем volume как индикатор активности
-        // В реальном сценарии нужно хранить исторические данные в БД
-        const oiChange24h = 0; // TODO: Требуется исторические данные
-        const oiChange4h = 0;  // TODO: Требуется исторические данные
+        // Безопасное преобразование с значениями по умолчанию
+        const currentPrice = parseFloat(ticker.lastPrice || '0');
+        const volume24h = parseFloat(ticker.volume || '0');
+        const priceChange24h = parseFloat(ticker.priceChangePercent || '0');
+        const highPrice = parseFloat(ticker.highPrice || currentPrice);
+        const lowPrice = parseFloat(ticker.lowPrice || currentPrice);
         
-        // Расчет сигналов на основе доступных метрик
+        // Пропускаем, если нет цены
+        if (currentPrice === 0) {
+          return null;
+        }
+        
+        // Расчет сигналов
         let signal = 'NEUTRAL';
         let signalReason = '';
+        let score = 0;
         
-        // Используем объем и изменение цены как прокси для силы тренда
+        // Используем volume как индикатор активности
         const volumeStrength = volume24h / CONFIG.min_oi_usdt;
-        const isVolumeSpike = volumeStrength > 5; // Объем в 5+ раз выше минимального
+        const isVolumeSpike = volumeStrength > 5;
         
         if (isVolumeSpike && Math.abs(priceChange24h) > 5) {
           if (priceChange24h > 0) {
             signal = 'BULLISH';
-            signalReason = `High volume (${(volumeStrength).toFixed(1)}x min) + price up ${priceChange24h.toFixed(1)}%`;
+            signalReason = `High volume + price up ${priceChange24h.toFixed(1)}%`;
+            score = 85;
           } else {
             signal = 'BEARISH';
-            signalReason = `High volume (${(volumeStrength).toFixed(1)}x min) + price down ${Math.abs(priceChange24h).toFixed(1)}%`;
+            signalReason = `High volume + price down ${Math.abs(priceChange24h).toFixed(1)}%`;
+            score = 85;
           }
         } else if (Math.abs(priceChange24h) > 10) {
           signal = priceChange24h > 0 ? 'BULLISH' : 'BEARISH';
           signalReason = `Strong price movement: ${priceChange24h.toFixed(1)}%`;
+          score = 70;
         } else if (oiData.openInterest > CONFIG.min_oi_usdt * 2) {
           signal = 'NEUTRAL';
-          signalReason = `High OI (${(oiData.openInterest / 1000000).toFixed(1)}M USDT) but volume normal`;
+          signalReason = `High OI but normal volume`;
+          score = 30;
+        } else if (Math.abs(priceChange24h) > 3) {
+          signal = priceChange24h > 0 ? 'BULLISH' : 'BEARISH';
+          signalReason = `Moderate movement: ${priceChange24h.toFixed(1)}%`;
+          score = 50;
         }
         
+        // Всегда возвращаем объект с полными данными, без undefined
         return {
-          symbol,
+          symbol: symbol,
           currentOI: oiData.openInterest,
-          oiChange24h,
-          oiChange4h,
-          currentPrice,
-          volume24h,
-          priceChange24h,
-          signal,
-          signalReason,
+          oiChange24h: 0, // TODO: требуется история
+          oiChange4h: 0,  // TODO: требуется история
+          currentPrice: currentPrice,
+          volume24h: volume24h,
+          priceChange24h: priceChange24h,
+          highPrice: highPrice,
+          lowPrice: lowPrice,
+          signal: signal,
+          signalReason: signalReason,
+          score: score,
           timestamp: new Date().toISOString(),
+          // Форматированные строки для отображения
+          oiFormatted: `${(oiData.openInterest / 1000000).toFixed(2)}M`,
+          volumeFormatted: `${(volume24h / 1000000).toFixed(2)}M`,
+          priceFormatted: currentPrice.toFixed(2),
         };
       } catch (error) {
         console.error(`Error processing ${symbol}:`, error);
@@ -227,20 +189,22 @@ async function calculateOISignals() {
     const validResults = batchResults.filter(r => r !== null);
     signals.push(...validResults);
     
-    // Небольшая пауза между батчами для избежания rate limit
     if (i + CONFIG.batch_size < symbolsToProcess.length) {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
   
-  // Сортируем по текущему OI (desc)
-  signals.sort((a, b) => b.currentOI - a.currentOI);
+  // Сортируем по score
+  signals.sort((a, b) => b.score - a.score);
   
-  // Добавляем топ-20 сигналов с пояснениями
+  // Возвращаем только топ-20, гарантируя, что все поля есть
   const enhancedSignals = signals.slice(0, 20).map(signal => ({
     ...signal,
-    oiFormatted: `${(signal.currentOI / 1000000).toFixed(2)}M USDT`,
-    volumeFormatted: `${(signal.volume24h / 1000000).toFixed(2)}M USDT`,
+    // Дополнительная безопасность - убеждаемся, что все поля есть
+    oiChange24h: signal.oiChange24h || 0,
+    oiChange4h: signal.oiChange4h || 0,
+    priceChange24h: signal.priceChange24h || 0,
+    score: signal.score || 0,
   }));
   
   return {
@@ -254,7 +218,6 @@ async function calculateOISignals() {
 
 export async function GET() {
   try {
-    // Проверяем кэш
     if (oiCache && (Date.now() - oiCache.timestamp) < CACHE_TTL) {
       console.log('Returning cached OI data');
       return NextResponse.json(oiCache.data);
@@ -263,7 +226,6 @@ export async function GET() {
     console.log('Fetching fresh OI data from BingX...');
     const oiData = await calculateOISignals();
     
-    // Сохраняем в кэш
     oiCache = {
       data: oiData,
       timestamp: Date.now(),
@@ -273,21 +235,23 @@ export async function GET() {
   } catch (error) {
     console.error('OI scanner error:', error);
     
-    // Возвращаем ошибку с деталями
+    // Возвращаем валидный JSON даже при ошибке
     return NextResponse.json(
       { 
+        signals: [],
+        totalScanned: 0,
+        validSignals: 0,
         error: 'OI service temporarily unavailable',
         message: error instanceof Error ? error.message : 'Unknown error',
         timestamp: new Date().toISOString(),
+        config: CONFIG,
       }, 
-      { status: 503 }
+      { status: 200 } // Возвращаем 200, чтобы фронтенд не падал
     );
   }
 }
 
-// Добавляем POST метод для ручного обновления кэша
 export async function POST() {
-  // Сбрасываем кэш
   oiCache = null;
   
   try {
@@ -303,8 +267,12 @@ export async function POST() {
     });
   } catch (error) {
     return NextResponse.json(
-      { error: 'Failed to refresh cache' },
-      { status: 500 }
+      { 
+        signals: [],
+        error: 'Failed to refresh cache',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      },
+      { status: 200 }
     );
   }
 }
