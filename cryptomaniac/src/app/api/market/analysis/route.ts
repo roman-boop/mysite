@@ -16,15 +16,29 @@ const CONFIG = {
   rsi_period: 14,
   fractal_window: 5,
   regression_window: 48,
-  lookback_limit: 180, // 4h candles, ~30 days
+  lookback_limit: 180,
 };
 
 async function fetchOHLCV(symbol: string, interval = '4h', limit = 180) {
+  const url = `${BINANCE_BASE}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    const url = `${BINANCE_BASE}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-    const res = await fetch(url, { next: { revalidate: 0 } });
-    if (!res.ok) return null;
+    const res = await fetch(url, {
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' },
+    });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      console.error(`[Market/Analysis] fetchOHLCV HTTP ${res.status} for ${symbol}: ${await res.text().catch(() => '')}`);
+      return null;
+    }
     const raw: any[][] = await res.json();
+    if (!Array.isArray(raw) || raw.length === 0) {
+      console.error(`[Market/Analysis] fetchOHLCV empty response for ${symbol}`);
+      return null;
+    }
     return raw.map((c) => ({
       open: parseFloat(c[1]),
       high: parseFloat(c[2]),
@@ -32,8 +46,13 @@ async function fetchOHLCV(symbol: string, interval = '4h', limit = 180) {
       close: parseFloat(c[4]),
       volume: parseFloat(c[5]),
     }));
-  } catch (err) {
-    console.error(`[Market/Analysis] fetchOHLCV error for ${symbol}:`, err);
+  } catch (err: any) {
+    clearTimeout(timeout);
+    if (err?.name === 'AbortError') {
+      console.error(`[Market/Analysis] fetchOHLCV timeout for ${symbol}`);
+    } else {
+      console.error(`[Market/Analysis] fetchOHLCV error for ${symbol}:`, err?.message ?? err);
+    }
     return null;
   }
 }
@@ -226,9 +245,22 @@ function forecast(ind: Record<string, number>): { upward: number; downward: numb
 
 export async function GET() {
   try {
+    console.log('[Market/Analysis] Starting market analysis fetch for', CRYPTO_SYMBOLS.length, 'symbols');
+
     const results = await Promise.allSettled(
       CRYPTO_SYMBOLS.map((sym) => fetchOHLCV(sym, '4h', CONFIG.lookback_limit))
     );
+
+    const successCount = results.filter((r) => r.status === 'fulfilled' && r.value !== null).length;
+    console.log(`[Market/Analysis] Fetched ${successCount}/${CRYPTO_SYMBOLS.length} symbols successfully`);
+
+    if (successCount === 0) {
+      console.error('[Market/Analysis] All symbol fetches failed — Binance API may be unreachable from this server');
+      return NextResponse.json(
+        { error: 'Failed to fetch market data — Binance API unreachable from server' },
+        { status: 500 }
+      );
+    }
 
     const rows = results.map((r) =>
       r.status === 'fulfilled' && r.value ? assetIndicators(r.value) : null
@@ -236,13 +268,18 @@ export async function GET() {
 
     const agg = aggregate(rows);
     if (!agg) {
-      console.error('[Market/Analysis] Failed to aggregate market data — all symbols returned null');
-      return NextResponse.json({ error: 'Failed to fetch market data' }, { status: 500 });
+      console.error('[Market/Analysis] aggregate() returned null — insufficient candle data from all symbols');
+      return NextResponse.json(
+        { error: 'Failed to fetch market data — insufficient candle data' },
+        { status: 500 }
+      );
     }
 
-    const probs = forecast(agg);
+    console.log('[Market/Analysis] Aggregated indicators:', JSON.stringify(agg));
 
-    // Determine dominant condition
+    const probs = forecast(agg);
+    console.log('[Market/Analysis] Forecast probabilities:', JSON.stringify(probs));
+
     let condition: string;
     if (probs.upward > 0.5) condition = 'BULLISH';
     else if (probs.downward > 0.5) condition = 'BEARISH';
@@ -261,8 +298,8 @@ export async function GET() {
       condition,
       timestamp: new Date().toISOString(),
     });
-  } catch (err) {
-    console.error('[Market/Analysis] GET handler error:', err);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  } catch (err: any) {
+    console.error('[Market/Analysis] GET handler fatal error:', err?.message ?? err, err?.stack ?? '');
+    return NextResponse.json({ error: `Internal server error: ${err?.message ?? 'unknown'}` }, { status: 500 });
   }
 }

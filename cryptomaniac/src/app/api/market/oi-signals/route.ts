@@ -12,22 +12,48 @@ const CONFIG = {
 async function binanceGet(endpoint: string, params: Record<string, string | number> = {}) {
   const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
   const url = `${BINANCE_FAPI}${endpoint}${qs ? '?' + qs : ''}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    const res = await fetch(url, { next: { revalidate: 0 } });
-    if (!res.ok) return null;
+    const res = await fetch(url, {
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' },
+    });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.error(`[Market/OI] binanceGet HTTP ${res.status} for ${endpoint} params=${JSON.stringify(params)}: ${body}`);
+      return null;
+    }
     return res.json();
-  } catch (err) {
-    console.error(`[Market/OI] binanceGet error for ${endpoint}:`, err);
+  } catch (err: any) {
+    clearTimeout(timeout);
+    if (err?.name === 'AbortError') {
+      console.error(`[Market/OI] binanceGet timeout for ${endpoint} params=${JSON.stringify(params)}`);
+    } else {
+      console.error(`[Market/OI] binanceGet error for ${endpoint} params=${JSON.stringify(params)}:`, err?.message ?? err);
+    }
     return null;
   }
 }
 
 async function getSymbols(): Promise<string[]> {
+  console.log('[Market/OI] Fetching symbols from Binance FAPI exchangeInfo');
   const data = await binanceGet('/fapi/v1/exchangeInfo');
-  if (!data?.symbols) return [];
-  return data.symbols
+  if (!data) {
+    console.error('[Market/OI] getSymbols: exchangeInfo returned null');
+    return [];
+  }
+  if (!data.symbols) {
+    console.error('[Market/OI] getSymbols: exchangeInfo response missing symbols field:', JSON.stringify(data).slice(0, 200));
+    return [];
+  }
+  const symbols = data.symbols
     .filter((s: any) => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT' && s.status === 'TRADING')
     .map((s: any) => s.symbol);
+  console.log(`[Market/OI] getSymbols: found ${symbols.length} USDT perpetual symbols`);
+  return symbols;
 }
 
 function pct(now: number, past: number): number {
@@ -44,8 +70,22 @@ async function checkSymbol(symbol: string) {
       binanceGet('/fapi/v1/klines', { symbol, interval: '5m', limit: 288 }),
     ]);
 
-    if (!oi4h || !oi24h || oi24h.length < 288) return null;
-    if (!klines4h || !klines24h) return null;
+    if (!oi4h || !Array.isArray(oi4h) || oi4h.length === 0) {
+      console.error(`[Market/OI] checkSymbol ${symbol}: oi4h data missing or empty`);
+      return null;
+    }
+    if (!oi24h || !Array.isArray(oi24h) || oi24h.length < 288) {
+      console.error(`[Market/OI] checkSymbol ${symbol}: oi24h insufficient data (got ${oi24h?.length ?? 0}, need 288)`);
+      return null;
+    }
+    if (!klines4h || !Array.isArray(klines4h) || klines4h.length === 0) {
+      console.error(`[Market/OI] checkSymbol ${symbol}: klines4h data missing`);
+      return null;
+    }
+    if (!klines24h || !Array.isArray(klines24h) || klines24h.length === 0) {
+      console.error(`[Market/OI] checkSymbol ${symbol}: klines24h data missing`);
+      return null;
+    }
 
     const oiNow = parseFloat(oi4h[oi4h.length - 1].sumOpenInterestValue);
     const oi4hAgo = parseFloat(oi4h[0].sumOpenInterestValue);
@@ -73,6 +113,8 @@ async function checkSymbol(symbol: string) {
 
     if (!signal4h && !signal24h) return null;
 
+    console.log(`[Market/OI] Signal found for ${symbol}: period=${signal4h ? '4h' : '24h'} oi4h=${oiGrowth4h.toFixed(2)}% oi24h=${oiGrowth24h.toFixed(2)}%`);
+
     return {
       symbol,
       period: signal4h ? '4h' : '24h',
@@ -83,43 +125,52 @@ async function checkSymbol(symbol: string) {
       price_now: priceNow,
       oi_now: oiNow,
     };
-  } catch (err) {
-    console.error(`[Market/OI] checkSymbol error for ${symbol}:`, err);
+  } catch (err: any) {
+    console.error(`[Market/OI] checkSymbol fatal error for ${symbol}:`, err?.message ?? err);
     return null;
   }
 }
 
 export async function GET() {
   try {
+    console.log('[Market/OI] GET /api/market/oi-signals called');
     const symbols = await getSymbols();
     if (!symbols.length) {
-      console.error('[Market/OI] No symbols returned from Binance exchangeInfo');
-      return NextResponse.json({ signals: [], scanned: 0, elapsed_ms: 0 });
+      console.error('[Market/OI] No symbols returned — cannot proceed with OI scan');
+      return NextResponse.json({ signals: [], scanned: 0, elapsed_ms: 0, error: 'No symbols from Binance FAPI' });
     }
 
     const start = Date.now();
-
-    // Process in batches of 20 to avoid overwhelming the API
     const BATCH = 20;
+    const MAX_SYMBOLS = 200;
     const results: any[] = [];
-    for (let i = 0; i < Math.min(symbols.length, 200); i += BATCH) {
+
+    console.log(`[Market/OI] Scanning ${Math.min(symbols.length, MAX_SYMBOLS)} symbols in batches of ${BATCH}`);
+
+    for (let i = 0; i < Math.min(symbols.length, MAX_SYMBOLS); i += BATCH) {
       const batch = symbols.slice(i, i + BATCH);
       const batchResults = await Promise.allSettled(batch.map(checkSymbol));
       for (const r of batchResults) {
         if (r.status === 'fulfilled' && r.value) results.push(r.value);
+        if (r.status === 'rejected') {
+          console.error('[Market/OI] batch promise rejected:', r.reason);
+        }
       }
     }
 
     results.sort((a, b) => Math.max(b.oi_growth_4h, b.oi_growth_24h) - Math.max(a.oi_growth_4h, a.oi_growth_24h));
 
+    const elapsed = Date.now() - start;
+    console.log(`[Market/OI] Scan complete: ${results.length} signals found in ${elapsed}ms across ${Math.min(symbols.length, MAX_SYMBOLS)} symbols`);
+
     return NextResponse.json({
       signals: results.slice(0, 15),
-      scanned: Math.min(symbols.length, 200),
-      elapsed_ms: Date.now() - start,
+      scanned: Math.min(symbols.length, MAX_SYMBOLS),
+      elapsed_ms: elapsed,
       timestamp: new Date().toISOString(),
     });
-  } catch (err) {
-    console.error('OI signals error:', err);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  } catch (err: any) {
+    console.error('[Market/OI] GET handler fatal error:', err?.message ?? err, err?.stack ?? '');
+    return NextResponse.json({ error: `Internal server error: ${err?.message ?? 'unknown'}` }, { status: 500 });
   }
 }
