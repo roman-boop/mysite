@@ -18,8 +18,10 @@ const canUseCookies = (() => {
 const fromCookies = () =>
   typeof document === 'undefined' ? [] :
   document.cookie.split(';').filter(Boolean).map((c) => {
-    const [name, ...rest] = c.trim().split('=');
-    return { name: name.trim(), value: decodeURIComponent(rest.join('=')) };
+    const eqIdx = c.trim().indexOf('=');
+    const name = eqIdx >= 0 ? c.trim().slice(0, eqIdx) : c.trim();
+    const value = eqIdx >= 0 ? decodeURIComponent(c.trim().slice(eqIdx + 1)) : '';
+    return { name: name.trim(), value };
   }).filter((c) => c.name);
 
 const fromStorage = () => {
@@ -36,6 +38,25 @@ const setCookie = (name: string, value: string, options?: any) => {
   if (options?.domain) s += `; Domain=${options.domain}`;
   if (options?.expires) s += `; Expires=${new Date(options.expires).toUTCString()}`;
   document.cookie = s;
+};
+const deleteCookie = (name: string) => {
+  if (typeof document === 'undefined') return;
+
+  const host = typeof window !== 'undefined' ? window.location.hostname : '';
+  const domains = ['', host, host ? `.${host}` : ''].filter(Boolean);
+
+  const variants = [
+    'Path=/; SameSite=Lax',
+    'Path=/; SameSite=None; Secure',
+    'Path=/; SameSite=None; Secure; Partitioned',
+  ];
+
+  variants.forEach((attrs) => {
+    document.cookie = `${name}=; Max-Age=0; ${attrs}`;
+    domains.forEach((domain) => {
+      document.cookie = `${name}=; Max-Age=0; Domain=${domain}; ${attrs}`;
+    });
+  });
 };
 
 const getToken = () =>
@@ -69,7 +90,7 @@ export function createClient() {
           if (canUseCookies()) {
             cookiesToSet.forEach(({ name, value, options }) =>
               value ? setCookie(name, value, options)
-                    : (document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=None; Secure`)
+                    : deleteCookie(name)
             );
           } else {
             cookiesToSet.forEach(({ name, value, options }) => {

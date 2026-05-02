@@ -14,24 +14,15 @@ interface MarketAnalysis {
   timestamp: string;
 }
 
-// Обновленный тип для OI сигналов от BingX
 interface OISignal {
   symbol: string;
-  currentOI: number;
-  oiChange24h: number;
-  oiChange4h: number;
-  currentPrice: number;
-  volume24h: number;
-  priceChange24h: number;
-  highPrice: number;
-  lowPrice: number;
-  signal: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
-  signalReason: string;
-  score: number;
-  timestamp: string;
-  oiFormatted?: string;
-  volumeFormatted?: string;
-  priceFormatted?: string;
+  period: string;
+  oi_growth_4h: number;
+  oi_growth_24h: number;
+  price_growth_4h: number;
+  price_growth_24h: number;
+  price_now: number;
+  oi_now: number;
 }
 
 interface FundingSignal {
@@ -59,31 +50,15 @@ function fmtTime(d: Date | null): string {
 }
 
 function fmtPct(n: number): string {
-  if (n === undefined || n === null) return '0.0%';
   return `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
 }
 
 function fmtFunding(n: number): string {
-  if (n === undefined || n === null) return '0.0000%';
   return `${n >= 0 ? '+' : ''}${(n * 100).toFixed(4)}%`;
 }
 
 function cleanSymbol(sym: string): string {
   return sym.replace('USDT', '').replace('-USDT', '').replace('_USDT', '');
-}
-
-// Безопасный форматтер для OI
-function formatOI(oi: number): string {
-  if (!oi || oi === 0) return '0M';
-  return `${(oi / 1_000_000).toFixed(1)}M`;
-}
-
-// Безопасный форматтер для цены
-function formatPrice(price: number): string {
-  if (!price || price === 0) return '—';
-  if (price < 1) return price.toFixed(6);
-  if (price < 100) return price.toFixed(4);
-  return price.toFixed(2);
 }
 
 // ─── Custom Tooltip ───────────────────────────────────────────────────────────
@@ -147,46 +122,6 @@ function SkeletonRows({ count = 5, cols = 5 }: { count?: number; cols?: number }
   );
 }
 
-// ─── OI Signal Row Component ─────────────────────────────────────────────────
-
-function OISignalRow({ signal, index }: { signal: OISignal; index: number }) {
-  // Безопасное получение значений
-  const oiChange4h = signal.oiChange4h || 0;
-  const oiChange24h = signal.oiChange24h || 0;
-  const priceChange24h = signal.priceChange24h || 0;
-  const currentOI = signal.currentOI || 0;
-  
-  // Определяем цвет сигнала
-  const getSignalColor = () => {
-    if (signal.signal === 'BULLISH') return 'text-green-400/80';
-    if (signal.signal === 'BEARISH') return 'text-red-400/80';
-    return 'text-yellow-400/60';
-  };
-  
-  return (
-    <div className="grid grid-cols-[0.5fr_1.2fr_0.8fr_0.8fr_0.8fr_0.8fr_0.7fr] items-center gap-0 px-5 py-3 border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors">
-      <span className="text-[10px] font-mono text-white/20">{index + 1}</span>
-      <div className="flex flex-col">
-        <span className="text-xs font-mono font-semibold text-white/75">{cleanSymbol(signal.symbol)}</span>
-        <span className={`text-[8px] uppercase tracking-wider ${getSignalColor()}`}>{signal.signal}</span>
-      </div>
-      <span className="text-xs font-mono text-white/40">{formatOI(currentOI)}</span>
-      <span className={`text-xs font-mono ${oiChange4h >= 0 ? 'text-green-400/70' : 'text-red-400/70'}`}>
-        {fmtPct(oiChange4h)}
-      </span>
-      <span className={`text-xs font-mono ${oiChange24h >= 0 ? 'text-green-400/70' : 'text-red-400/70'}`}>
-        {fmtPct(oiChange24h)}
-      </span>
-      <span className={`text-xs font-mono ${priceChange24h >= 0 ? 'text-white/50' : 'text-red-400/60'}`}>
-        {fmtPct(priceChange24h)}
-      </span>
-      <span className="text-[11px] font-mono text-white/30">
-        {formatPrice(signal.currentPrice)}
-      </span>
-    </div>
-  );
-}
-
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function MarketPage() {
@@ -216,41 +151,13 @@ export default function MarketPage() {
   const fetchOI = useCallback(async () => {
     setOiResult((p) => ({ ...p, loading: true, error: null }));
     try {
-      const res = await fetch('/api/oi'); // ← изменен путь на /api/oi
+      const res = await fetch('/api/market/oi-signals');
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Failed');
-      
-      // Обработка данных от BingX
-      let signals: OISignal[] = [];
-      if (json.signals && Array.isArray(json.signals)) {
-        signals = json.signals.map((s: any) => ({
-          symbol: s.symbol || 'Unknown',
-          currentOI: s.currentOI || 0,
-          oiChange24h: s.oiChange24h || 0,
-          oiChange4h: s.oiChange4h || 0,
-          currentPrice: s.currentPrice || 0,
-          volume24h: s.volume24h || 0,
-          priceChange24h: s.priceChange24h || 0,
-          highPrice: s.highPrice || 0,
-          lowPrice: s.lowPrice || 0,
-          signal: s.signal || 'NEUTRAL',
-          signalReason: s.signalReason || '',
-          score: s.score || 0,
-          timestamp: s.timestamp || new Date().toISOString(),
-        }));
-      }
-      
-      setOiResult({ 
-        data: signals, 
-        loading: false, 
-        error: json.error || null, 
-        lastUpdated: new Date(), 
-        scanned: json.totalScanned || json.scanned || 0, 
-        elapsed_ms: json.elapsed_ms || 0 
-      });
+      setOiResult({ data: json.signals, loading: false, error: null, lastUpdated: new Date(), scanned: json.scanned, elapsed_ms: json.elapsed_ms });
     } catch (e: any) {
       console.error('[Market] OI signals fetch error:', e);
-      setOiResult((p) => ({ ...p, loading: false, error: e.message, data: [] }));
+      setOiResult((p) => ({ ...p, loading: false, error: e.message }));
     }
   }, []);
 
@@ -401,11 +308,11 @@ export default function MarketPage() {
                     ) : analysis.data ? (
                       <div className="space-y-2">
                         {[
-                          { label: 'RSI', value: analysis.data.indicators.rsi?.toFixed(1) || '—' },
-                          { label: 'ADX', value: analysis.data.indicators.adx?.toFixed(1) || '—' },
-                          { label: 'Fractal Overlap', value: analysis.data.indicators.fractal_overlap?.toFixed(2) || '—' },
-                          { label: 'R²', value: analysis.data.indicators.r2?.toFixed(3) || '—' },
-                          { label: 'Volume Ratio', value: analysis.data.indicators.volume_ratio?.toFixed(2) || '—' },
+                          { label: 'RSI', value: analysis.data.indicators.rsi.toFixed(1) },
+                          { label: 'ADX', value: analysis.data.indicators.adx.toFixed(1) },
+                          { label: 'Fractal Overlap', value: analysis.data.indicators.fractal_overlap.toFixed(2) },
+                          { label: 'R²', value: analysis.data.indicators.r2.toFixed(3) },
+                          { label: 'Volume Ratio', value: analysis.data.indicators.volume_ratio.toFixed(2) },
                         ].map(({ label, value }) => (
                           <div key={label} className="flex items-center justify-between">
                             <span className="text-[11px] text-white/35">{label}</span>
@@ -421,12 +328,12 @@ export default function MarketPage() {
           </div>
         </section>
 
-        {/* ── Section 2: Open Interest Signals (BingX) ── */}
+        {/* ── Section 2: Open Interest Signals ── */}
         <section className="mb-12">
           <SectionLabel
             index="02"
-            label="Open Interest Signals (BingX)"
-            badge={oiResult.data ? `${oiResult.data.length} signals` : undefined}
+            label="Open Interest Signals"
+            badge={oiResult.data ? `${oiResult.data.length} tokens` : undefined}
             lastUpdated={oiResult.lastUpdated}
             loading={oiResult.loading}
             interval="3min"
@@ -434,22 +341,53 @@ export default function MarketPage() {
 
           <div className="border border-white/[0.07] bg-[#0d0d0d] overflow-hidden">
             {/* Table header */}
-            <div className="grid grid-cols-[0.5fr_1.2fr_0.8fr_0.8fr_0.8fr_0.8fr_0.7fr] gap-0 border-b border-white/[0.07] px-5 py-2.5">
-              {['#', 'Token / Signal', 'OI', 'OI Δ4h', 'OI Δ24h', 'Price Δ24h', 'Price'].map((h) => (
+            <div className="grid grid-cols-[1.2fr_0.8fr_0.8fr_0.8fr_0.8fr_0.7fr] gap-0 border-b border-white/[0.07] px-5 py-2.5">
+              {['Token', 'Period', 'OI 4h', 'OI 24h', 'Price 4h', 'OI Value'].map((h) => (
                 <span key={h} className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/20">{h}</span>
               ))}
             </div>
 
             {oiResult.loading && !oiResult.data ? (
-              <SkeletonRows count={6} cols={7} />
+              <SkeletonRows count={6} cols={6} />
             ) : oiResult.error ? (
               <div className="px-5 py-6 text-xs text-red-400/70">{oiResult.error}</div>
             ) : !oiResult.data?.length ? (
-              <div className="px-5 py-6 text-xs text-white/25">No significant OI signals found</div>
+              <div className="px-5 py-6 text-xs text-white/25">No significant OI divergences found</div>
             ) : (
-              oiResult.data.map((signal, i) => (
-                <OISignalRow key={signal.symbol} signal={signal} index={i} />
-              ))
+              oiResult.data.map((sig, i) => {
+                const maxGrowth = Math.max(sig.oi_growth_4h, sig.oi_growth_24h);
+                const isPositive = maxGrowth >= 0;
+                return (
+                  <div
+                    key={sig.symbol}
+                    className={`grid grid-cols-[1.2fr_0.8fr_0.8fr_0.8fr_0.8fr_0.7fr] items-center gap-0 px-5 py-3 border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors ${
+                      i % 2 !== 0 ? 'bg-white/[0.01]' : ''
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono text-white/20 w-4">{i + 1}</span>
+                      <span className="text-xs font-mono font-semibold text-white/75">{cleanSymbol(sig.symbol)}</span>
+                    </div>
+                    <span className={`text-[10px] font-bold uppercase tracking-[0.12em] px-1.5 py-0.5 w-fit ${
+                      sig.period === '4h' ? 'bg-amber-400/10 text-amber-400/80' : 'bg-blue-400/10 text-blue-400/80'
+                    }`}>
+                      {sig.period}
+                    </span>
+                    <span className={`text-xs font-mono ${sig.oi_growth_4h >= 0 ? 'text-green-400/80' : 'text-red-400/80'}`}>
+                      {fmtPct(sig.oi_growth_4h)}
+                    </span>
+                    <span className={`text-xs font-mono ${sig.oi_growth_24h >= 0 ? 'text-green-400/80' : 'text-red-400/80'}`}>
+                      {fmtPct(sig.oi_growth_24h)}
+                    </span>
+                    <span className={`text-xs font-mono ${sig.price_growth_4h >= 0 ? 'text-white/50' : 'text-red-400/60'}`}>
+                      {fmtPct(sig.price_growth_4h)}
+                    </span>
+                    <span className="text-[11px] font-mono text-white/30">
+                      ${(sig.oi_now / 1e6).toFixed(1)}M
+                    </span>
+                  </div>
+                );
+              })
             )}
 
             {/* Footer */}
@@ -514,7 +452,7 @@ export default function MarketPage() {
                       {sig.direction}
                     </span>
                     <span className="text-[11px] font-mono text-white/35">
-                      ${sig.mark_price > 0 ? (sig.mark_price < 1 ? sig.mark_price.toFixed(6) : sig.mark_price < 100 ? sig.mark_price.toFixed(4) : sig.mark_price.toFixed(2)) : '—'}
+                      ${sig.mark_price > 0 ? sig.mark_price.toFixed(sig.mark_price < 1 ? 6 : sig.mark_price < 100 ? 4 : 2) : '—'}
                     </span>
                   </div>
                 );

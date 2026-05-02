@@ -1,278 +1,176 @@
-// app/api/oi/route.ts
 import { NextResponse } from 'next/server';
 
-const BINGX_FAPI = 'https://open-api.bingx.com';
+const BINANCE_FAPI = 'https://fapi.binance.com';
 
 const CONFIG = {
   oi_4h_threshold: 8.0,
   oi_24h_threshold: 12.0,
   price_oi_ratio: 0.4,
   min_oi_usdt: 5_000_000,
-  max_symbols: 80,
-  batch_size: 8,
 };
 
-// Кэширование
-let oiCache: {
-  data: any;
-  timestamp: number;
-} | null = null;
-const CACHE_TTL = 60 * 1000;
-
-async function bingxGet(endpoint: string, params: any = {}) {
-  const qs = new URLSearchParams(params).toString();
-  const url = `${BINGX_FAPI}${endpoint}${qs ? `?${qs}` : ''}`;
-
+async function binanceGet(endpoint: string, params: Record<string, string | number> = {}) {
+  const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
+  const url = `${BINANCE_FAPI}${endpoint}${qs ? '?' + qs : ''}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
   try {
     const res = await fetch(url, {
-      signal: AbortSignal.timeout(10000),
-      headers: { 
-        'Accept': 'application/json',
-        'Content-Type': 'application/json'
-      }
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' },
     });
-
+    clearTimeout(timeout);
     if (!res.ok) {
-      console.error(`BingX API error: ${res.status} ${res.statusText}`);
+      const body = await res.text().catch(() => '');
+      console.error(`[Market/OI] binanceGet HTTP ${res.status} for ${endpoint} params=${JSON.stringify(params)}: ${body}`);
       return null;
     }
-    
-    const data = await res.json();
-    
-    if (data.code !== 0) {
-      console.error(`BingX API error code: ${data.code}, msg: ${data.msg}`);
-      return null;
+    return res.json();
+  } catch (err: any) {
+    clearTimeout(timeout);
+    if (err?.name === 'AbortError') {
+      console.error(`[Market/OI] binanceGet timeout for ${endpoint} params=${JSON.stringify(params)}`);
+    } else {
+      console.error(`[Market/OI] binanceGet error for ${endpoint} params=${JSON.stringify(params)}:`, err?.message ?? err);
     }
-    
-    return data;
-  } catch (error) {
-    console.error(`BingX request failed for ${endpoint}:`, error);
     return null;
   }
 }
 
-async function getAllSymbols() {
-  const data = await bingxGet('/openApi/swap/v2/quote/contracts');
-  
-  if (!data || !data.data) {
-    console.error('Failed to fetch symbols from BingX');
+async function getSymbols(): Promise<string[]> {
+  console.log('[Market/OI] Fetching symbols from Binance FAPI exchangeInfo');
+  const data = await binanceGet('/fapi/v1/exchangeInfo');
+  if (!data) {
+    console.error('[Market/OI] getSymbols: exchangeInfo returned null');
     return [];
   }
-  
-  const symbols = data.data
-    .filter((contract: any) => contract.symbol.endsWith('USDT'))
-    .map((contract: any) => contract.symbol);
-  
-  console.log(`Fetched ${symbols.length} USDT symbols from BingX`);
+  if (!data.symbols) {
+    console.error('[Market/OI] getSymbols: exchangeInfo response missing symbols field:', JSON.stringify(data).slice(0, 200));
+    return [];
+  }
+  const symbols = data.symbols
+    .filter((s: any) => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT' && s.status === 'TRADING')
+    .map((s: any) => s.symbol);
+  console.log(`[Market/OI] getSymbols: found ${symbols.length} USDT perpetual symbols`);
   return symbols;
 }
 
-async function getOpenInterest(symbol: string) {
-  const data = await bingxGet('/openApi/swap/v2/quote/openInterest', { symbol });
-  
-  if (!data || !data.data) {
-    return null;
-  }
-  
-  return {
-    symbol: symbol,
-    openInterest: parseFloat(data.data.openInterest || '0'),
-    timestamp: data.data.timestamp || Date.now(),
-  };
+function pct(now: number, past: number): number {
+  if (past === 0) return 0;
+  return ((now - past) / past) * 100;
 }
 
-async function calculateOISignals() {
-  const symbols = await getAllSymbols();
-  
-  if (!symbols.length) {
-    throw new Error('No symbols fetched from BingX');
-  }
-  
-  const symbolsToProcess = symbols.slice(0, CONFIG.max_symbols);
-  const signals = [];
-  
-  console.log(`Processing ${symbolsToProcess.length} symbols...`);
-  
-  for (let i = 0; i < symbolsToProcess.length; i += CONFIG.batch_size) {
-    const batch = symbolsToProcess.slice(i, i + CONFIG.batch_size);
-    
-    const batchPromises = batch.map(async (symbol) => {
-      try {
-        // Получаем OI
-        let oiData = await getOpenInterest(symbol);
-        
-        if (!oiData || oiData.openInterest === 0 || oiData.openInterest < CONFIG.min_oi_usdt) {
-          return null;
-        }
-        
-        // Получаем ticker данные
-        const tickerData = await bingxGet('/openApi/swap/v2/quote/ticker', { symbol });
-        
-        if (!tickerData || !tickerData.data) {
-          return null;
-        }
-        
-        const ticker = tickerData.data;
-        
-        // Безопасное преобразование с значениями по умолчанию
-        const currentPrice = parseFloat(ticker.lastPrice || '0');
-        const volume24h = parseFloat(ticker.volume || '0');
-        const priceChange24h = parseFloat(ticker.priceChangePercent || '0');
-        const highPrice = parseFloat(ticker.highPrice || currentPrice);
-        const lowPrice = parseFloat(ticker.lowPrice || currentPrice);
-        
-        // Пропускаем, если нет цены
-        if (currentPrice === 0) {
-          return null;
-        }
-        
-        // Расчет сигналов
-        let signal = 'NEUTRAL';
-        let signalReason = '';
-        let score = 0;
-        
-        // Используем volume как индикатор активности
-        const volumeStrength = volume24h / CONFIG.min_oi_usdt;
-        const isVolumeSpike = volumeStrength > 5;
-        
-        if (isVolumeSpike && Math.abs(priceChange24h) > 5) {
-          if (priceChange24h > 0) {
-            signal = 'BULLISH';
-            signalReason = `High volume + price up ${priceChange24h.toFixed(1)}%`;
-            score = 85;
-          } else {
-            signal = 'BEARISH';
-            signalReason = `High volume + price down ${Math.abs(priceChange24h).toFixed(1)}%`;
-            score = 85;
-          }
-        } else if (Math.abs(priceChange24h) > 10) {
-          signal = priceChange24h > 0 ? 'BULLISH' : 'BEARISH';
-          signalReason = `Strong price movement: ${priceChange24h.toFixed(1)}%`;
-          score = 70;
-        } else if (oiData.openInterest > CONFIG.min_oi_usdt * 2) {
-          signal = 'NEUTRAL';
-          signalReason = `High OI but normal volume`;
-          score = 30;
-        } else if (Math.abs(priceChange24h) > 3) {
-          signal = priceChange24h > 0 ? 'BULLISH' : 'BEARISH';
-          signalReason = `Moderate movement: ${priceChange24h.toFixed(1)}%`;
-          score = 50;
-        }
-        
-        // Всегда возвращаем объект с полными данными, без undefined
-        return {
-          symbol: symbol,
-          currentOI: oiData.openInterest,
-          oiChange24h: 0, // TODO: требуется история
-          oiChange4h: 0,  // TODO: требуется история
-          currentPrice: currentPrice,
-          volume24h: volume24h,
-          priceChange24h: priceChange24h,
-          highPrice: highPrice,
-          lowPrice: lowPrice,
-          signal: signal,
-          signalReason: signalReason,
-          score: score,
-          timestamp: new Date().toISOString(),
-          // Форматированные строки для отображения
-          oiFormatted: `${(oiData.openInterest / 1000000).toFixed(2)}M`,
-          volumeFormatted: `${(volume24h / 1000000).toFixed(2)}M`,
-          priceFormatted: currentPrice.toFixed(2),
-        };
-      } catch (error) {
-        console.error(`Error processing ${symbol}:`, error);
-        return null;
-      }
-    });
-    
-    const batchResults = await Promise.all(batchPromises);
-    const validResults = batchResults.filter(r => r !== null);
-    signals.push(...validResults);
-    
-    if (i + CONFIG.batch_size < symbolsToProcess.length) {
-      await new Promise(resolve => setTimeout(resolve, 500));
+async function checkSymbol(symbol: string) {
+  try {
+    const [oi4h, oi24h, klines4h, klines24h] = await Promise.all([
+      binanceGet('/futures/data/openInterestHist', { symbol, period: '5m', limit: 48 }),
+      binanceGet('/futures/data/openInterestHist', { symbol, period: '5m', limit: 288 }),
+      binanceGet('/fapi/v1/klines', { symbol, interval: '5m', limit: 48 }),
+      binanceGet('/fapi/v1/klines', { symbol, interval: '5m', limit: 288 }),
+    ]);
+
+    if (!oi4h || !Array.isArray(oi4h) || oi4h.length === 0) {
+      console.error(`[Market/OI] checkSymbol ${symbol}: oi4h data missing or empty`);
+      return null;
     }
+    if (!oi24h || !Array.isArray(oi24h) || oi24h.length < 288) {
+      console.error(`[Market/OI] checkSymbol ${symbol}: oi24h insufficient data (got ${oi24h?.length ?? 0}, need 288)`);
+      return null;
+    }
+    if (!klines4h || !Array.isArray(klines4h) || klines4h.length === 0) {
+      console.error(`[Market/OI] checkSymbol ${symbol}: klines4h data missing`);
+      return null;
+    }
+    if (!klines24h || !Array.isArray(klines24h) || klines24h.length === 0) {
+      console.error(`[Market/OI] checkSymbol ${symbol}: klines24h data missing`);
+      return null;
+    }
+
+    const oiNow = parseFloat(oi4h[oi4h.length - 1].sumOpenInterestValue);
+    const oi4hAgo = parseFloat(oi4h[0].sumOpenInterestValue);
+    const oi24hAgo = parseFloat(oi24h[0].sumOpenInterestValue);
+
+    if (oiNow < CONFIG.min_oi_usdt) return null;
+
+    const oiGrowth4h = pct(oiNow, oi4hAgo);
+    const oiGrowth24h = pct(oiNow, oi24hAgo);
+
+    const priceNow = parseFloat(klines4h[klines4h.length - 1][4]);
+    const price4hAgo = parseFloat(klines4h[0][4]);
+    const price24hAgo = parseFloat(klines24h[0][4]);
+
+    const priceGrowth4h = pct(priceNow, price4hAgo);
+    const priceGrowth24h = pct(priceNow, price24hAgo);
+
+    const signal4h =
+      oiGrowth4h >= CONFIG.oi_4h_threshold &&
+      priceGrowth4h <= oiGrowth4h * CONFIG.price_oi_ratio;
+
+    const signal24h =
+      oiGrowth24h >= CONFIG.oi_24h_threshold &&
+      priceGrowth24h <= oiGrowth24h * CONFIG.price_oi_ratio;
+
+    if (!signal4h && !signal24h) return null;
+
+    console.log(`[Market/OI] Signal found for ${symbol}: period=${signal4h ? '4h' : '24h'} oi4h=${oiGrowth4h.toFixed(2)}% oi24h=${oiGrowth24h.toFixed(2)}%`);
+
+    return {
+      symbol,
+      period: signal4h ? '4h' : '24h',
+      oi_growth_4h: Math.round(oiGrowth4h * 10) / 10,
+      oi_growth_24h: Math.round(oiGrowth24h * 10) / 10,
+      price_growth_4h: Math.round(priceGrowth4h * 10) / 10,
+      price_growth_24h: Math.round(priceGrowth24h * 10) / 10,
+      price_now: priceNow,
+      oi_now: oiNow,
+    };
+  } catch (err: any) {
+    console.error(`[Market/OI] checkSymbol fatal error for ${symbol}:`, err?.message ?? err);
+    return null;
   }
-  
-  // Сортируем по score
-  signals.sort((a, b) => b.score - a.score);
-  
-  // Возвращаем только топ-20, гарантируя, что все поля есть
-  const enhancedSignals = signals.slice(0, 20).map(signal => ({
-    ...signal,
-    // Дополнительная безопасность - убеждаемся, что все поля есть
-    oiChange24h: signal.oiChange24h || 0,
-    oiChange4h: signal.oiChange4h || 0,
-    priceChange24h: signal.priceChange24h || 0,
-    score: signal.score || 0,
-  }));
-  
-  return {
-    signals: enhancedSignals,
-    totalScanned: symbolsToProcess.length,
-    validSignals: signals.length,
-    timestamp: new Date().toISOString(),
-    config: CONFIG,
-  };
 }
 
 export async function GET() {
   try {
-    if (oiCache && (Date.now() - oiCache.timestamp) < CACHE_TTL) {
-      console.log('Returning cached OI data');
-      return NextResponse.json(oiCache.data);
+    console.log('[Market/OI] GET /api/market/oi-signals called');
+    const symbols = await getSymbols();
+    if (!symbols.length) {
+      console.error('[Market/OI] No symbols returned — cannot proceed with OI scan');
+      return NextResponse.json({ signals: [], scanned: 0, elapsed_ms: 0, error: 'No symbols from Binance FAPI' });
     }
-    
-    console.log('Fetching fresh OI data from BingX...');
-    const oiData = await calculateOISignals();
-    
-    oiCache = {
-      data: oiData,
-      timestamp: Date.now(),
-    };
-    
-    return NextResponse.json(oiData);
-  } catch (error) {
-    console.error('OI scanner error:', error);
-    
-    // Возвращаем валидный JSON даже при ошибке
-    return NextResponse.json(
-      { 
-        signals: [],
-        totalScanned: 0,
-        validSignals: 0,
-        error: 'OI service temporarily unavailable',
-        message: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString(),
-        config: CONFIG,
-      }, 
-      { status: 200 } // Возвращаем 200, чтобы фронтенд не падал
-    );
-  }
-}
 
-export async function POST() {
-  oiCache = null;
-  
-  try {
-    const freshData = await calculateOISignals();
-    oiCache = {
-      data: freshData,
-      timestamp: Date.now(),
-    };
-    
+    const start = Date.now();
+    const BATCH = 20;
+    const MAX_SYMBOLS = 200;
+    const results: any[] = [];
+
+    console.log(`[Market/OI] Scanning ${Math.min(symbols.length, MAX_SYMBOLS)} symbols in batches of ${BATCH}`);
+
+    for (let i = 0; i < Math.min(symbols.length, MAX_SYMBOLS); i += BATCH) {
+      const batch = symbols.slice(i, i + BATCH);
+      const batchResults = await Promise.allSettled(batch.map(checkSymbol));
+      for (const r of batchResults) {
+        if (r.status === 'fulfilled' && r.value) results.push(r.value);
+        if (r.status === 'rejected') {
+          console.error('[Market/OI] batch promise rejected:', r.reason);
+        }
+      }
+    }
+
+    results.sort((a, b) => Math.max(b.oi_growth_4h, b.oi_growth_24h) - Math.max(a.oi_growth_4h, a.oi_growth_24h));
+
+    const elapsed = Date.now() - start;
+    console.log(`[Market/OI] Scan complete: ${results.length} signals found in ${elapsed}ms across ${Math.min(symbols.length, MAX_SYMBOLS)} symbols`);
+
     return NextResponse.json({
-      ...freshData,
-      cacheRefreshed: true,
+      signals: results.slice(0, 15),
+      scanned: Math.min(symbols.length, MAX_SYMBOLS),
+      elapsed_ms: elapsed,
+      timestamp: new Date().toISOString(),
     });
-  } catch (error) {
-    return NextResponse.json(
-      { 
-        signals: [],
-        error: 'Failed to refresh cache',
-        message: error instanceof Error ? error.message : 'Unknown error',
-      },
-      { status: 200 }
-    );
+  } catch (err: any) {
+    console.error('[Market/OI] GET handler fatal error:', err?.message ?? err, err?.stack ?? '');
+    return NextResponse.json({ error: `Internal server error: ${err?.message ?? 'unknown'}` }, { status: 500 });
   }
 }
