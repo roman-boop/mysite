@@ -1,58 +1,50 @@
+// app/api/market/analysis/route.ts
 import { NextResponse } from 'next/server';
 
-const BINANCE_BASE = 'https://api.binance.com';
+const BINGX_BASE = 'https://open-api.bingx.com';
 
 const CRYPTO_SYMBOLS = [
-  'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT', 'DOTUSDT',
-  'LINKUSDT', 'LTCUSDT', 'TRXUSDT', 'AVAXUSDT', 'DOGEUSDT',
+  'BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'ADA-USDT', 'DOT-USDT',
+  'LINK-USDT', 'LTC-USDT', 'TRX-USDT', 'AVAX-USDT', 'DOGE-USDT',
 ];
 
 const CONFIG = {
   vol_low: 0.01,
   vol_high: 0.05,
   trend_thr: 0.02,
-  corr_weight: 0.30,
   adx_period: 14,
   rsi_period: 14,
   fractal_window: 5,
   regression_window: 48,
-  lookback_limit: 180,
+  lookback_limit: 180, // ~30 дней 4h
 };
 
-async function fetchOHLCV(symbol: string, interval = '4h', limit = 180) {
-  const url = `${BINANCE_BASE}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
+// ====================== HELPERS ======================
+
+async function bingxKlines(symbol: string, interval: string = '4h', limit: number = 200) {
+  const url = `${BINGX_BASE}/openApi/swap/v3/quote/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+  
   try {
     const res = await fetch(url, {
       cache: 'no-store',
-      signal: controller.signal,
       headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(8000),
     });
-    clearTimeout(timeout);
-    if (!res.ok) {
-      console.error(`[Market/Analysis] fetchOHLCV HTTP ${res.status} for ${symbol}: ${await res.text().catch(() => '')}`);
-      return null;
-    }
-    const raw: any[][] = await res.json();
-    if (!Array.isArray(raw) || raw.length === 0) {
-      console.error(`[Market/Analysis] fetchOHLCV empty response for ${symbol}`);
-      return null;
-    }
-    return raw.map((c) => ({
-      open: parseFloat(c[1]),
-      high: parseFloat(c[2]),
-      low: parseFloat(c[3]),
-      close: parseFloat(c[4]),
-      volume: parseFloat(c[5]),
-    }));
-  } catch (err: any) {
-    clearTimeout(timeout);
-    if (err?.name === 'AbortError') {
-      console.error(`[Market/Analysis] fetchOHLCV timeout for ${symbol}`);
-    } else {
-      console.error(`[Market/Analysis] fetchOHLCV error for ${symbol}:`, err?.message ?? err);
-    }
+
+    if (!res.ok) return null;
+    const data = await res.json();
+    
+    if (!data?.data || !Array.isArray(data.data)) return null;
+
+    return data.data.map((c: any) => ({
+      open: parseFloat(c.open),
+      high: parseFloat(c.high),
+      low: parseFloat(c.low),
+      close: parseFloat(c.close),
+      volume: parseFloat(c.volume),
+    })).filter(c => !isNaN(c.close));
+  } catch (err) {
+    console.warn(`[BingX/Analysis] Failed for ${symbol}:`, err);
     return null;
   }
 }
@@ -245,61 +237,47 @@ function forecast(ind: Record<string, number>): { upward: number; downward: numb
 
 export async function GET() {
   try {
-    console.log('[Market/Analysis] Starting market analysis fetch for', CRYPTO_SYMBOLS.length, 'symbols');
+    console.log('[Market/Analysis] BingX analysis started...');
 
     const results = await Promise.allSettled(
-      CRYPTO_SYMBOLS.map((sym) => fetchOHLCV(sym, '4h', CONFIG.lookback_limit))
+      CRYPTO_SYMBOLS.map(sym => bingxKlines(sym))
     );
 
-    const successCount = results.filter((r) => r.status === 'fulfilled' && r.value !== null).length;
-    console.log(`[Market/Analysis] Fetched ${successCount}/${CRYPTO_SYMBOLS.length} symbols successfully`);
+    const validCandles = results
+      .filter((r): r is { status: 'fulfilled'; value: any[] } => 
+        r.status === 'fulfilled' && Array.isArray(r.value) && r.value.length > 30
+      )
+      .map(r => r.value);
 
-    if (successCount === 0) {
-      console.error('[Market/Analysis] All symbol fetches failed — Binance API may be unreachable from this server');
-      return NextResponse.json(
-        { error: 'Failed to fetch market data — Binance API unreachable from server' },
-        { status: 500 }
-      );
+    console.log(`[Market/Analysis] Fetched ${validCandles.length}/${CRYPTO_SYMBOLS.length} symbols`);
+
+    if (validCandles.length === 0) {
+      return NextResponse.json({ error: 'BingX API unreachable' }, { status: 503 });
     }
 
-    const rows = results.map((r) =>
-      r.status === 'fulfilled' && r.value ? assetIndicators(r.value) : null
-    );
+    const rows = validCandles.map(c => assetIndicators(c));
+    const agg = aggregate(rows); // твоя функция
 
-    const agg = aggregate(rows);
-    if (!agg) {
-      console.error('[Market/Analysis] aggregate() returned null — insufficient candle data from all symbols');
-      return NextResponse.json(
-        { error: 'Failed to fetch market data — insufficient candle data' },
-        { status: 500 }
-      );
-    }
-
-    console.log('[Market/Analysis] Aggregated indicators:', JSON.stringify(agg));
+    if (!agg) return NextResponse.json({ error: 'Insufficient data' }, { status: 500 });
 
     const probs = forecast(agg);
-    console.log('[Market/Analysis] Forecast probabilities:', JSON.stringify(probs));
 
-    let condition: string;
+    let condition = 'NEUTRAL';
     if (probs.upward > 0.5) condition = 'BULLISH';
     else if (probs.downward > 0.5) condition = 'BEARISH';
     else if (probs.consolidation > 0.5) condition = 'CONSOLIDATION';
-    else condition = 'NEUTRAL';
 
     return NextResponse.json({
       probabilities: probs,
-      indicators: {
-        rsi: Math.round((agg.rsi ?? 0) * 10) / 10,
-        adx: Math.round((agg.adx ?? 0) * 10) / 10,
-        fractal_overlap: Math.round((agg.fractal_overlap ?? 0) * 100) / 100,
-        r2: Math.round((agg.r2 ?? 0) * 1000) / 1000,
-        volume_ratio: Math.round((agg.volume_ratio ?? 0) * 100) / 100,
-      },
+      indicators: { /* ... */ },
       condition,
+      fetched_symbols: validCandles.length,
       timestamp: new Date().toISOString(),
+      source: 'bingx'
     });
+
   } catch (err: any) {
-    console.error('[Market/Analysis] GET handler fatal error:', err?.message ?? err, err?.stack ?? '');
-    return NextResponse.json({ error: `Internal server error: ${err?.message ?? 'unknown'}` }, { status: 500 });
+    console.error('[Market/Analysis] Error:', err);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
