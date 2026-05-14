@@ -23,6 +23,7 @@ interface OISignal {
   price_growth_24h: number;
   price_now: number;
   oi_now: number;
+  volume_growth?: number;   // новое поле (опционально)
 }
 
 interface FundingSignal {
