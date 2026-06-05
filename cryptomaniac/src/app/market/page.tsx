@@ -9,28 +9,20 @@ import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 
 interface MarketAnalysis {
   probabilities: { upward: number; downward: number; consolidation: number };
-  indicators: { 
-    rsi: number; 
-    adx: number; 
-    fractal_overlap: number; 
-    r2: number; 
-    volume_ratio: number;
-    trend_strength?: number;
-  };
+  indicators: { rsi: number; adx: number; fractal_overlap: number; r2: number; volume_ratio: number };
   condition: string;
   timestamp: string;
 }
 
 interface OISignal {
   symbol: string;
-  period?: string;
+  period: string;
   oi_growth_4h: number;
   oi_growth_24h: number;
   price_growth_4h: number;
   price_growth_24h: number;
-  price_now?: number;
-  oi_now?: number;
-  volume_growth?: number;
+  price_now: number;
+  oi_now: number;
 }
 
 interface FundingSignal {
@@ -38,7 +30,7 @@ interface FundingSignal {
   funding_rate: number;
   mark_price: number;
   direction: 'LONG' | 'SHORT';
-  abs_rate?: number;
+  abs_rate: number;
 }
 
 interface ApiResult<T> {
@@ -65,14 +57,17 @@ function fmtFunding(n: number): string {
   return `${n >= 0 ? '+' : ''}${(n * 100).toFixed(4)}%`;
 }
 
-// Обновлённая функция под BingX (BTC-USDT)
 function cleanSymbol(sym: string): string {
-  if (!sym) return '—';
-  return sym
-    .replace('-USDT', '')
-    .replace('USDT', '')
-    .replace('_USDT', '')
-    .replace(/[^A-Z0-9]/g, '');
+  return sym.replace('USDT', '').replace('-USDT', '').replace('_USDT', '');
+}
+
+function fmtPrice(p: number): string {
+  if (!p || p === 0) return '—';
+  if (p < 0.001) return p.toFixed(8);
+  if (p < 1) return p.toFixed(6);
+  if (p < 100) return p.toFixed(4);
+  if (p < 10000) return p.toFixed(2);
+  return p.toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
 
 // ─── Custom Tooltip ───────────────────────────────────────────────────────────
@@ -136,6 +131,17 @@ function SkeletonRows({ count = 5, cols = 5 }: { count?: number; cols?: number }
   );
 }
 
+// ─── Error Banner ─────────────────────────────────────────────────────────────
+
+function ErrorBanner({ message }: { message: string }) {
+  return (
+    <div className="px-5 py-4 flex items-start gap-3">
+      <span className="text-red-400/60 text-[10px] font-mono mt-0.5">ERR</span>
+      <span className="text-xs text-red-400/70 font-mono">{message}</span>
+    </div>
+  );
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function MarketPage() {
@@ -154,7 +160,11 @@ export default function MarketPage() {
     try {
       const res = await fetch('/api/market/analysis');
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Failed');
+      if (!res.ok) {
+        const errMsg = json?.error || `HTTP ${res.status}`;
+        console.error('[Market] Analysis fetch error:', errMsg);
+        throw new Error(errMsg);
+      }
       setAnalysis({ data: json, loading: false, error: null, lastUpdated: new Date() });
     } catch (e: any) {
       console.error('[Market] Analysis fetch error:', e);
@@ -167,28 +177,18 @@ export default function MarketPage() {
     try {
       const res = await fetch('/api/market/oi-signals');
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Failed');
-
-      // Защита от неполных данных
-      const safeSignals = (json.signals || []).map((s: any) => ({
-        symbol: s.symbol || '',
-        period: s.period || '4h',
-        oi_growth_4h: s.oi_growth_4h || 0,
-        oi_growth_24h: s.oi_growth_24h || 0,
-        price_growth_4h: s.price_growth_4h || 0,
-        price_growth_24h: s.price_growth_24h || 0,
-        price_now: s.price_now || 0,
-        oi_now: s.oi_now || 0,
-        volume_growth: s.volume_growth,
-      }));
-
-      setOiResult({ 
-        data: safeSignals, 
-        loading: false, 
-        error: null, 
-        lastUpdated: new Date(), 
-        scanned: json.scanned, 
-        elapsed_ms: json.elapsed_ms 
+      if (!res.ok) {
+        const errMsg = json?.error || `HTTP ${res.status}`;
+        console.error('[Market] OI signals fetch error:', errMsg);
+        throw new Error(errMsg);
+      }
+      setOiResult({
+        data: json.signals ?? [],
+        loading: false,
+        error: null,
+        lastUpdated: new Date(),
+        scanned: json.scanned,
+        elapsed_ms: json.elapsed_ms,
       });
     } catch (e: any) {
       console.error('[Market] OI signals fetch error:', e);
@@ -201,14 +201,18 @@ export default function MarketPage() {
     try {
       const res = await fetch('/api/market/funding-signals');
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Failed');
-      setFundingResult({ 
-        data: json.signals, 
-        loading: false, 
-        error: null, 
-        lastUpdated: new Date(), 
-        scanned: json.scanned, 
-        elapsed_ms: json.elapsed_ms 
+      if (!res.ok) {
+        const errMsg = json?.error || `HTTP ${res.status}`;
+        console.error('[Market] Funding signals fetch error:', errMsg);
+        throw new Error(errMsg);
+      }
+      setFundingResult({
+        data: json.signals ?? [],
+        loading: false,
+        error: null,
+        lastUpdated: new Date(),
+        scanned: json.scanned,
+        elapsed_ms: json.elapsed_ms,
       });
     } catch (e: any) {
       console.error('[Market] Funding signals fetch error:', e);
@@ -265,27 +269,28 @@ export default function MarketPage() {
       <main className="max-w-7xl mx-auto px-6 md:px-12 pt-32 pb-24">
         {/* Page title */}
         <div className="mb-12">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.3em] text-white/25 mb-2">Analytics</p>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.3em] text-white/25 mb-2">Analytics · BingX</p>
           <h1 className="text-3xl md:text-4xl font-display font-medium tracking-tight">Market</h1>
+          <p className="text-xs text-white/25 mt-2 font-mono">Powered by BingX Perpetual Swaps API</p>
         </div>
 
-        {/* Market Analyzer */}
+        {/* ── Section 1: Market Analyzer ── */}
         <section className="mb-12">
           <SectionLabel
             index="01"
             label="Market Analyzer"
+            badge="BingX · 4h"
             lastUpdated={analysis.lastUpdated}
             loading={analysis.loading}
             interval="4h"
           />
-          {/* ... (оставил без изменений) */}
+
           <div className="border border-white/[0.07] bg-[#0d0d0d]">
             {analysis.error ? (
-              <div className="px-6 py-8 text-xs text-red-400/70">{analysis.error}</div>
+              <ErrorBanner message={analysis.error} />
             ) : (
               <div className="flex flex-col md:flex-row">
-                {/* Donut + Stats — без изменений */}
-                {/* (оставил оригинальный код этого блока) */}
+                {/* Donut */}
                 <div className="w-full md:w-56 h-48 flex-shrink-0 flex items-center justify-center border-b md:border-b-0 md:border-r border-white/[0.06]">
                   <ResponsiveContainer width="100%" height="100%">
                     <PieChart>
@@ -308,101 +313,74 @@ export default function MarketPage() {
                   </ResponsiveContainer>
                 </div>
 
+                {/* Stats */}
                 <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.06]">
-                  {/* Probabilities и Indicators — без изменений */}
-                  {/* ... */}
+                  {/* Probabilities */}
+                  <div className="px-6 py-5">
+                    <p className="text-[9px] uppercase tracking-[0.25em] text-white/25 mb-3">Probabilities</p>
+                    <div className="space-y-2.5">
+                      {chartData.map((item) => (
+                        <div key={item.name} className="flex items-center gap-3">
+                          <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: item.color }} />
+                          <span className="text-[11px] text-white/40 w-24">{item.name}</span>
+                          <div className="flex-1 h-px bg-white/5 relative">
+                            <div
+                              className="absolute top-0 left-0 h-px transition-all duration-700"
+                              style={{ width: `${item.value * 100}%`, backgroundColor: item.color, opacity: 0.5 }}
+                            />
+                          </div>
+                          <span className="text-xs font-mono font-semibold" style={{ color: item.color }}>
+                            {(item.value * 100).toFixed(1)}%
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-4 pt-3 border-t border-white/[0.06]">
+                      <span className="text-[9px] uppercase tracking-[0.2em] text-white/25 mr-2">Condition</span>
+                      <span className={`text-xs font-semibold ${conditionColor}`}>
+                        {analysis.loading ? '—' : (analysis.data?.condition ?? '—')}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Indicators */}
+                  <div className="px-6 py-5">
+                    <p className="text-[9px] uppercase tracking-[0.25em] text-white/25 mb-3">Indicators · BingX 4h</p>
+                    {analysis.loading ? (
+                      <div className="space-y-2">
+                        {[...Array(5)].map((_, i) => (
+                          <div key={i} className="h-2.5 bg-white/5 rounded animate-pulse" />
+                        ))}
+                      </div>
+                    ) : analysis.data ? (
+                      <div className="space-y-2">
+                        {[
+                          { label: 'RSI', value: analysis.data.indicators.rsi.toFixed(1) },
+                          { label: 'ADX', value: analysis.data.indicators.adx.toFixed(1) },
+                          { label: 'Fractal Overlap', value: analysis.data.indicators.fractal_overlap.toFixed(2) },
+                          { label: 'R²', value: analysis.data.indicators.r2.toFixed(3) },
+                          { label: 'Volume Ratio', value: analysis.data.indicators.volume_ratio.toFixed(2) },
+                        ].map(({ label, value }) => (
+                          <div key={label} className="flex items-center justify-between">
+                            <span className="text-[11px] text-white/35">{label}</span>
+                            <span className="text-[11px] font-mono text-white/60">{value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               </div>
             )}
           </div>
         </section>
 
-        {/* Open Interest Signals */}
+        {/* ── Section 2: BingX Funding Rate Scanner ── */}
         <section className="mb-12">
           <SectionLabel
             index="02"
-            label="Open Interest Signals"
-            badge={oiResult.data ? `${oiResult.data.length} tokens` : undefined}
-            lastUpdated={oiResult.lastUpdated}
-            loading={oiResult.loading}
-            interval="3min"
-          />
-
-          <div className="border border-white/[0.07] bg-[#0d0d0d] overflow-hidden">
-            <div className="grid grid-cols-[1.2fr_0.8fr_0.8fr_0.8fr_0.8fr_0.7fr] gap-0 border-b border-white/[0.07] px-5 py-2.5">
-              {['Token', 'Period', 'OI 4h', 'OI 24h', 'Price 4h', 'OI Value'].map((h) => (
-                <span key={h} className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/20">{h}</span>
-              ))}
-            </div>
-
-            {oiResult.loading && !oiResult.data ? (
-              <SkeletonRows count={6} cols={6} />
-            ) : oiResult.error ? (
-              <div className="px-5 py-6 text-xs text-red-400/70">{oiResult.error}</div>
-            ) : !oiResult.data?.length ? (
-              <div className="px-5 py-6 text-xs text-white/25">No significant OI divergences found</div>
-            ) : (
-              oiResult.data.map((sig, i) => {
-                const oi4h = sig.oi_growth_4h || 0;
-                const oi24h = sig.oi_growth_24h || 0;
-                const price4h = sig.price_growth_4h || 0;
-
-                return (
-                  <div
-                    key={sig.symbol}
-                    className={`grid grid-cols-[1.2fr_0.8fr_0.8fr_0.8fr_0.8fr_0.7fr] items-center gap-0 px-5 py-3 border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors ${
-                      i % 2 !== 0 ? 'bg-white/[0.01]' : ''
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] font-mono text-white/20 w-4">{i + 1}</span>
-                      <span className="text-xs font-mono font-semibold text-white/75">
-                        {cleanSymbol(sig.symbol)}
-                      </span>
-                    </div>
-                    <span className={`text-[10px] font-bold uppercase tracking-[0.12em] px-1.5 py-0.5 w-fit ${
-                      sig.period === '4h' ? 'bg-amber-400/10 text-amber-400/80' : 'bg-blue-400/10 text-blue-400/80'
-                    }`}>
-                      {sig.period || '—'}
-                    </span>
-                    <span className={`text-xs font-mono ${oi4h >= 0 ? 'text-green-400/80' : 'text-red-400/80'}`}>
-                      {fmtPct(oi4h)}
-                    </span>
-                    <span className={`text-xs font-mono ${oi24h >= 0 ? 'text-green-400/80' : 'text-red-400/80'}`}>
-                      {fmtPct(oi24h)}
-                    </span>
-                    <span className={`text-xs font-mono ${price4h >= 0 ? 'text-white/50' : 'text-red-400/60'}`}>
-                      {fmtPct(price4h)}
-                    </span>
-                    <span className="text-[11px] font-mono text-white/30">
-                      ${((sig.oi_now || 0) / 1_000_000).toFixed(1)}M
-                    </span>
-                  </div>
-                );
-              })
-            )}
-
-            {(oiResult.scanned || oiResult.elapsed_ms) && (
-              <div className="px-5 py-2.5 border-t border-white/[0.04] flex items-center gap-4">
-                {oiResult.scanned && (
-                  <span className="text-[9px] text-white/20 font-mono">scanned {oiResult.scanned} symbols</span>
-                )}
-                {oiResult.elapsed_ms && (
-                  <span className="text-[9px] text-white/20 font-mono">
-                    {(oiResult.elapsed_ms / 1000).toFixed(1)}s
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
-        </section>
-
-         {/* ── Section 3: Funding Rate Signals ── */}
-        <section>
-          <SectionLabel
-            index="03"
-            label="Funding Rate Signals"
-            badge={fundingResult.data ? `${fundingResult.data.length} tokens` : undefined}
+            label="Funding Rate Scanner"
+            badge={fundingResult.data ? `${fundingResult.data.length} signals` : undefined}
             lastUpdated={fundingResult.lastUpdated}
             loading={fundingResult.loading}
             interval="5min"
@@ -410,8 +388,8 @@ export default function MarketPage() {
 
           <div className="border border-white/[0.07] bg-[#0d0d0d] overflow-hidden">
             {/* Table header */}
-            <div className="grid grid-cols-[1.2fr_0.8fr_0.8fr_1fr] gap-0 border-b border-white/[0.07] px-5 py-2.5">
-              {['Token', 'Funding Rate', 'Direction', 'Mark Price'].map((h) => (
+            <div className="grid grid-cols-[1.4fr_0.9fr_0.7fr_1fr] gap-0 border-b border-white/[0.07] px-5 py-2.5">
+              {['Token', 'Funding Rate', 'Signal', 'Mark Price'].map((h) => (
                 <span key={h} className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/20">{h}</span>
               ))}
             </div>
@@ -419,16 +397,16 @@ export default function MarketPage() {
             {fundingResult.loading && !fundingResult.data ? (
               <SkeletonRows count={5} cols={4} />
             ) : fundingResult.error ? (
-              <div className="px-5 py-6 text-xs text-red-400/70">{fundingResult.error}</div>
+              <ErrorBanner message={fundingResult.error} />
             ) : !fundingResult.data?.length ? (
-              <div className="px-5 py-6 text-xs text-white/25">No interesting funding rates found</div>
+              <div className="px-5 py-6 text-xs text-white/25 font-mono">No funding rates above threshold (0.1%)</div>
             ) : (
               fundingResult.data.map((sig, i) => {
                 const isLong = sig.direction === 'LONG';
                 return (
                   <div
                     key={sig.symbol}
-                    className={`grid grid-cols-[1.2fr_0.8fr_0.8fr_1fr] items-center gap-0 px-5 py-3 border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors ${
+                    className={`grid grid-cols-[1.4fr_0.9fr_0.7fr_1fr] items-center gap-0 px-5 py-3 border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors ${
                       i % 2 !== 0 ? 'bg-white/[0.01]' : ''
                     }`}
                   >
@@ -436,7 +414,7 @@ export default function MarketPage() {
                       <span className="text-[10px] font-mono text-white/20 w-4">{i + 1}</span>
                       <span className="text-xs font-mono font-semibold text-white/75">{cleanSymbol(sig.symbol)}</span>
                     </div>
-                    <span className={`text-xs font-mono font-semibold ${isLong ? 'text-green-400/80' : 'text-red-400/80'}`}>
+                    <span className={`text-xs font-mono font-semibold tabular-nums ${isLong ? 'text-green-400/80' : 'text-red-400/80'}`}>
                       {fmtFunding(sig.funding_rate)}
                     </span>
                     <span className={`text-[10px] font-bold uppercase tracking-[0.12em] px-1.5 py-0.5 w-fit ${
@@ -444,29 +422,140 @@ export default function MarketPage() {
                     }`}>
                       {sig.direction}
                     </span>
-                    <span className="text-[11px] font-mono text-white/35">
-                      ${sig.mark_price > 0 ? sig.mark_price.toFixed(sig.mark_price < 1 ? 6 : sig.mark_price < 100 ? 4 : 2) : '—'}
+                    <span className="text-[11px] font-mono text-white/35 tabular-nums">
+                      ${fmtPrice(sig.mark_price)}
                     </span>
                   </div>
                 );
               })
             )}
 
+            {/* Footer */}
+            {(fundingResult.scanned || fundingResult.elapsed_ms) ? (
+              <div className="px-5 py-2.5 border-t border-white/[0.04] flex items-center gap-4">
+                {fundingResult.scanned ? (
+                  <span className="text-[9px] text-white/20 font-mono">scanned {fundingResult.scanned} symbols</span>
+                ) : null}
+                {fundingResult.elapsed_ms ? (
+                  <span className="text-[9px] text-white/20 font-mono">{(fundingResult.elapsed_ms / 1000).toFixed(1)}s</span>
+                ) : null}
+                <span className="text-[9px] text-white/15 font-mono ml-auto">threshold ≥ 0.1%</span>
+              </div>
+            ) : null}
+          </div>
+        </section>
+
+        {/* ── Section 3: BingX Open Interest Scanner ── */}
+        <section className="mb-12">
+          <SectionLabel
+            index="03"
+            label="Open Interest Scanner"
+            badge={oiResult.data ? `${oiResult.data.length} signals` : undefined}
+            lastUpdated={oiResult.lastUpdated}
+            loading={oiResult.loading}
+            interval="3min"
+          />
+
+          <div className="border border-white/[0.07] bg-[#0d0d0d] overflow-hidden">
+            {/* Table header */}
+            <div className="grid grid-cols-[1.4fr_0.7fr_0.9fr_0.9fr_0.9fr_0.8fr] gap-0 border-b border-white/[0.07] px-5 py-2.5">
+              {['Token', 'Period', 'Price 4h', 'Price 24h', 'Price', 'OI Value'].map((h) => (
+                <span key={h} className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/20">{h}</span>
+              ))}
+            </div>
+
+            {oiResult.loading && !oiResult.data ? (
+              <SkeletonRows count={6} cols={6} />
+            ) : oiResult.error ? (
+              <ErrorBanner message={oiResult.error} />
+            ) : !oiResult.data?.length ? (
+              <div className="px-5 py-6 text-xs text-white/25 font-mono">No OI divergence signals found</div>
+            ) : (
+              oiResult.data.map((sig, i) => {
+                return (
+                  <div
+                    key={sig.symbol}
+                    className={`grid grid-cols-[1.4fr_0.7fr_0.9fr_0.9fr_0.9fr_0.8fr] items-center gap-0 px-5 py-3 border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors ${
+                      i % 2 !== 0 ? 'bg-white/[0.01]' : ''
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono text-white/20 w-4">{i + 1}</span>
+                      <span className="text-xs font-mono font-semibold text-white/75">{cleanSymbol(sig.symbol)}</span>
+                    </div>
+                    <span className={`text-[10px] font-bold uppercase tracking-[0.12em] px-1.5 py-0.5 w-fit ${
+                      sig.period === '4h' ? 'bg-amber-400/10 text-amber-400/80' : 'bg-blue-400/10 text-blue-400/80'
+                    }`}>
+                      {sig.period}
+                    </span>
+                    <span className={`text-xs font-mono tabular-nums ${sig.price_growth_4h >= 0 ? 'text-green-400/70' : 'text-red-400/70'}`}>
+                      {fmtPct(sig.price_growth_4h)}
+                    </span>
+                    <span className={`text-xs font-mono tabular-nums ${sig.price_growth_24h >= 0 ? 'text-green-400/70' : 'text-red-400/70'}`}>
+                      {fmtPct(sig.price_growth_24h)}
+                    </span>
+                    <span className="text-[11px] font-mono text-white/50 tabular-nums">
+                      ${fmtPrice(sig.price_now)}
+                    </span>
+                    <span className="text-[11px] font-mono text-white/30 tabular-nums">
+                      ${(sig.oi_now / 1e6).toFixed(1)}M
+                    </span>
+                  </div>
+                );
+              })
+            )}
+
+            {/* Footer */}
+            {(oiResult.scanned || oiResult.elapsed_ms) ? (
+              <div className="px-5 py-2.5 border-t border-white/[0.04] flex items-center gap-4">
+                {oiResult.scanned ? (
+                  <span className="text-[9px] text-white/20 font-mono">scanned {oiResult.scanned} symbols</span>
+                ) : null}
+                {oiResult.elapsed_ms ? (
+                  <span className="text-[9px] text-white/20 font-mono">{(oiResult.elapsed_ms / 1000).toFixed(1)}s</span>
+                ) : null}
+                <span className="text-[9px] text-white/15 font-mono ml-auto">min OI ≥ $1M</span>
+              </div>
+            ) : null}
+          </div>
+        </section>
+
+        {/* ── Section 4: BingX Scanner Info ── */}
+        <section className="mb-4">
+          <div className="border border-white/[0.05] bg-[#0d0d0d] px-6 py-5">
+            <p className="text-[9px] uppercase tracking-[0.25em] text-white/20 mb-3">Scanner Configuration · BingX</p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {[
+                { label: 'Data Source', value: 'BingX Perpetual Swaps' },
+                { label: 'Funding Threshold', value: '≥ 0.1% (8h)' },
+                { label: 'OI Min Value', value: '≥ $1M' },
+                { label: 'Analysis Timeframe', value: '4h candles' },
+              ].map(({ label, value }) => (
+                <div key={label}>
+                  <p className="text-[9px] text-white/20 uppercase tracking-[0.15em] mb-1">{label}</p>
+                  <p className="text-[11px] font-mono text-white/50">{value}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
       </main>
 
-      {/* BingX Banner */}
+      {/* ── BingX Banner ── */}
       <a
         href="https://bingxdao.com/partner/maniacdt/"
         target="_blank"
         rel="noopener noreferrer"
         className="block w-full border-t border-white/[0.07] bg-[#0d0d0d] hover:bg-[#111] transition-colors"
       >
-        <div className="max-w-7xl mx-auto px-6 md:px-12 py-4 flex items-center justify-center gap-3">
-          <span className="text-[11px] text-white/35 tracking-wide text-center">
-            Торгуйте криптовалютами и другими рынками с самой низкой комиссией на{' '}
-            <span className="text-white/60 font-semibold">BingX</span>
-          </span>
-          <span className="text-[10px] text-white/20 font-mono flex-shrink-0">→</span>
+        <div className="max-w-7xl mx-auto px-6 md:px-12 py-5 flex items-center justify-center gap-4">
+          <div className="flex flex-col items-center gap-1">
+            <span className="text-[12px] text-white/40 tracking-wide text-center">
+              Торгуйте криптовалютами и другими рынками с самой низкой комиссией на{' '}
+              <span className="text-white/70 font-semibold">BingX</span>
+            </span>
+            <span className="text-[10px] text-white/20 font-mono tracking-widest uppercase">Открыть счёт →</span>
+          </div>
         </div>
       </a>
 
