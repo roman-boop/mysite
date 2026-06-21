@@ -2,15 +2,19 @@ import { NextResponse } from 'next/server';
 
 const BINGX_BASE = 'https://open-api.bingx.com';
 
-const CONFIG = {
-  oi_4h_threshold: 8.0,
-  oi_24h_threshold: 12.0,
-  price_oi_ratio: 0.4,
-  min_oi_usdt: 1_000_000, // BingX OI is in contracts, lower threshold
-};
+// ── FundingTrader thresholds (from Python script) ──────────────────────────
+const OI_CHANGE_MIN_PCT = 5.0;   // OI must grow > 5% over last hour
+const PRICE_OI_RATIO_MAX = 0.7;  // abs(price_change / oi_change) must be < 0.7
+const MIN_OI_VALUE = 500_000;    // minimum OI in contracts to filter dust
 
-// Matches BingxClient._public_request
-async function bingxGet(path: string, params: Record<string, string | number> = {}) {
+// ── In-memory OI history: symbol → [{ts_ms, oi, price}] ──────────────────
+// Matches Python: self.oi_history: Dict[str, deque] with maxlen=120
+const OI_HISTORY: Map<string, Array<{ ts_ms: number; oi: number; price: number }>> = new Map();
+const MAX_HISTORY = 120; // ~2 hours at 1-min intervals
+
+// ─── BingX helpers ────────────────────────────────────────────────────────
+
+async function bingxGet(path: string, params: Record<string, string | number> = {}): Promise<any> {
   const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
   const url = `${BINGX_BASE}${path}${qs ? '?' + qs : ''}`;
   const controller = new AbortController();
@@ -19,56 +23,40 @@ async function bingxGet(path: string, params: Record<string, string | number> = 
     const res = await fetch(url, {
       cache: 'no-store',
       signal: controller.signal,
-      headers: { 'Accept': 'application/json' },
+      headers: { Accept: 'application/json' },
     });
     clearTimeout(timeout);
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      console.error(`[Market/OI] bingxGet HTTP ${res.status} for ${path} params=${JSON.stringify(params)}: ${body}`);
+      console.error(`[Market/OI] HTTP ${res.status} for ${path} params=${JSON.stringify(params)}: ${body}`);
       return null;
     }
     return res.json();
   } catch (err: any) {
     clearTimeout(timeout);
     if (err?.name === 'AbortError') {
-      console.error(`[Market/OI] bingxGet timeout for ${path} params=${JSON.stringify(params)}`);
+      console.error(`[Market/OI] Timeout for ${path} params=${JSON.stringify(params)}`);
     } else {
-      console.error(`[Market/OI] bingxGet error for ${path} params=${JSON.stringify(params)}:`, err?.message ?? err);
+      console.error(`[Market/OI] Fetch error for ${path}:`, err?.message ?? err);
     }
     return null;
   }
 }
 
-// Matches BingxClient.get_all_tickers
+// Matches BingxClient.get_all_tikers
 async function getAllTickers(): Promise<string[]> {
-  console.log('[Market/OI] Fetching all tickers from BingX contracts');
   const data = await bingxGet('/openApi/swap/v2/quote/contracts');
-  if (!data) {
-    console.error('[Market/OI] getAllTickers: BingX contracts returned null');
+  if (!data || data.code !== 0 || !Array.isArray(data.data)) {
+    console.error('[Market/OI] getAllTickers failed:', data?.code, data?.msg);
     return [];
   }
-  if (data.code !== 0) {
-    console.error(`[Market/OI] getAllTickers: BingX returned code=${data.code} msg=${data.msg}`);
-    return [];
-  }
-  if (!Array.isArray(data.data)) {
-    console.error('[Market/OI] getAllTickers: data.data is not an array:', JSON.stringify(data).slice(0, 200));
-    return [];
-  }
-  const symbols = (data.data as any[]).map((item) => item.symbol as string);
-  console.log(`[Market/OI] getAllTickers: found ${symbols.length} symbols`);
-  return symbols;
+  return (data.data as any[]).map((item) => item.symbol as string);
 }
 
 // Matches BingxClient.get_open_insterest
 async function getOpenInterest(symbol: string): Promise<number | null> {
   const data = await bingxGet('/openApi/swap/v2/quote/openInterest', { symbol });
-  if (!data) return null;
-  if (data.code !== 0) {
-    console.error(`[Market/OI] getOpenInterest ${symbol}: code=${data.code} msg=${data.msg}`);
-    return null;
-  }
-  if (!data.data) return null;
+  if (!data || data.code !== 0 || !data.data) return null;
   const resData = data.data;
   if (Array.isArray(resData) && resData.length > 0) {
     const oi = resData[0]?.openInterest;
@@ -80,20 +68,7 @@ async function getOpenInterest(symbol: string): Promise<number | null> {
   return null;
 }
 
-// Matches BingxClient.get_klines — gets price data for OI divergence check
-async function getKlines(symbol: string, interval: string, limit: number): Promise<any[] | null> {
-  const data = await bingxGet('/openApi/swap/v3/quote/klines', { symbol, interval, limit });
-  if (!data) return null;
-  if (data.code !== 0) {
-    console.error(`[Market/OI] getKlines ${symbol}: code=${data.code} msg=${data.msg}`);
-    return null;
-  }
-  const rows: any[] = data.data ?? [];
-  if (!rows.length) return null;
-  return rows;
-}
-
-// Matches BingxClient.get_funding_rate via premiumIndex for mark price
+// Matches BingxClient.get_mark_price via premiumIndex
 async function getMarkPrice(symbol: string): Promise<number | null> {
   const data = await bingxGet('/openApi/swap/v2/quote/premiumIndex', { symbol });
   if (!data || data.code !== 0 || !data.data) return null;
@@ -103,69 +78,98 @@ async function getMarkPrice(symbol: string): Promise<number | null> {
   return mp != null ? parseFloat(mp) : null;
 }
 
-function pct(now: number, past: number): number {
-  if (past === 0) return 0;
-  return ((now - past) / past) * 100;
+// ─── OI history management ────────────────────────────────────────────────
+
+function addToHistory(symbol: string, oi: number, price: number): void {
+  const ts_ms = Date.now();
+  if (!OI_HISTORY.has(symbol)) {
+    OI_HISTORY.set(symbol, []);
+  }
+  const hist = OI_HISTORY.get(symbol)!;
+  hist.push({ ts_ms, oi, price });
+  // Keep max 120 entries (matches Python deque maxlen=120)
+  if (hist.length > MAX_HISTORY) {
+    hist.splice(0, hist.length - MAX_HISTORY);
+  }
 }
 
-async function checkSymbol(symbol: string) {
+/**
+ * Implements FundingTrader.check_oi_filter():
+ * - OI growth over last hour > +5%
+ * - abs(price_change / oi_change) < 0.7
+ */
+function checkOiFilter(
+  symbol: string,
+  currentOi: number,
+  currentPrice: number
+): { passes: boolean; oi_change_pct: number; price_change_pct: number; ratio: number } | null {
+  const hist = OI_HISTORY.get(symbol);
+  if (!hist || hist.length < 2) return null;
+
+  const now_ms = Date.now();
+  const target_ms = now_ms - 3_600_000; // 1 hour ago
+
+  // Find entry closest to "now - 1 hour" (matches Python logic)
+  let bestOld = hist[0];
+  for (const entry of hist) {
+    if (Math.abs(entry.ts_ms - target_ms) < Math.abs(bestOld.ts_ms - target_ms)) {
+      bestOld = entry;
+    }
+  }
+
+  const old_oi = bestOld.oi;
+  const old_price = bestOld.price;
+
+  if (old_oi === 0) return null;
+
+  const oi_change_pct = ((currentOi - old_oi) / old_oi) * 100;
+  const price_change_pct = old_price !== 0 ? ((currentPrice - old_price) / old_price) * 100 : 0;
+
+  // Condition 1: OI grew > 5%
+  if (oi_change_pct <= OI_CHANGE_MIN_PCT) {
+    return { passes: false, oi_change_pct, price_change_pct, ratio: 0 };
+  }
+
+  // Condition 2: price/OI ratio < 0.7
+  const ratio = oi_change_pct !== 0 ? Math.abs(price_change_pct / oi_change_pct) : 0;
+  const passes = ratio < PRICE_OI_RATIO_MAX;
+
+  return { passes, oi_change_pct, price_change_pct, ratio };
+}
+
+// ─── Main scan ────────────────────────────────────────────────────────────
+
+async function scanSymbol(symbol: string): Promise<any | null> {
   try {
-    // Fetch OI + klines in parallel (matching Python's ThreadPoolExecutor pattern)
-    const [oiNow, klines4h, klines24h] = await Promise.all([
-      getOpenInterest(symbol),
-      getKlines(symbol, '1h', 4),   // 4 x 1h candles = 4h window
-      getKlines(symbol, '1h', 24),  // 24 x 1h candles = 24h window
-    ]);
+    // Fetch OI and mark price in parallel (matches Python threading approach)
+    const [oi, price] = await Promise.all([getOpenInterest(symbol), getMarkPrice(symbol)]);
 
-    if (oiNow == null) return null;
-    if (oiNow < CONFIG.min_oi_usdt) return null;
+    if (oi == null || price == null) return null;
+    if (oi < MIN_OI_VALUE) return null;
 
-    if (!klines4h || klines4h.length < 2) {
-      console.error(`[Market/OI] checkSymbol ${symbol}: insufficient 4h klines (got ${klines4h?.length ?? 0})`);
-      return null;
-    }
-    if (!klines24h || klines24h.length < 2) {
-      console.error(`[Market/OI] checkSymbol ${symbol}: insufficient 24h klines (got ${klines24h?.length ?? 0})`);
-      return null;
-    }
+    // Store snapshot in history
+    addToHistory(symbol, oi, price);
 
-    // Price data from klines
-    const priceNow = parseFloat(klines4h[klines4h.length - 1].close);
-    const price4hAgo = parseFloat(klines4h[0].close);
-    const price24hAgo = parseFloat(klines24h[0].close);
+    // Check OI filter (needs at least 2 history entries)
+    const filterResult = checkOiFilter(symbol, oi, price);
+    if (!filterResult || !filterResult.passes) return null;
 
-    if (!priceNow || !price4hAgo || !price24hAgo) return null;
-
-    // For OI change we compare current OI vs a baseline
-    // Since BingX only gives current OI snapshot, we use price movement as proxy
-    // and apply the same divergence logic: OI growth vs price growth
-    const priceGrowth4h = pct(priceNow, price4hAgo);
-    const priceGrowth24h = pct(priceNow, price24hAgo);
-
-    // OI divergence: significant OI with low price movement signals accumulation
-    // Use absolute OI value as the "growth" metric since we have a snapshot
-    const oiInMillions = oiNow / 1_000_000;
-
-    // Signal: OI is large AND price movement is muted (divergence)
-    const signal4h = Math.abs(priceGrowth4h) < 2.0 && oiInMillions >= 10;
-    const signal24h = Math.abs(priceGrowth24h) < 5.0 && oiInMillions >= 50;
-
-    if (!signal4h && !signal24h) return null;
-
-    console.log(`[Market/OI] Signal found for ${symbol}: oi=${oiNow.toFixed(0)} price4h=${priceGrowth4h.toFixed(2)}% price24h=${priceGrowth24h.toFixed(2)}%`);
+    console.log(
+      `[Market/OI] Anomaly: ${symbol} | OI Δ=${filterResult.oi_change_pct.toFixed(2)}% | Price Δ=${filterResult.price_change_pct.toFixed(2)}% | ratio=${filterResult.ratio.toFixed(3)}`
+    );
 
     return {
       symbol,
-      period: signal4h ? '4h' : '24h',
-      oi_growth_4h: Math.round(priceGrowth4h * 10) / 10,
-      oi_growth_24h: Math.round(priceGrowth24h * 10) / 10,
-      price_growth_4h: Math.round(priceGrowth4h * 10) / 10,
-      price_growth_24h: Math.round(priceGrowth24h * 10) / 10,
-      price_now: priceNow,
-      oi_now: oiNow,
+      period: '1h',
+      oi_change_pct: Math.round(filterResult.oi_change_pct * 100) / 100,
+      price_change_pct: Math.round(filterResult.price_change_pct * 100) / 100,
+      price_oi_ratio: Math.round(filterResult.ratio * 1000) / 1000,
+      price_now: price,
+      oi_now: oi,
+      timestamp: new Date().toISOString(),
     };
   } catch (err: any) {
-    console.error(`[Market/OI] checkSymbol fatal error for ${symbol}:`, err?.message ?? err);
+    console.error(`[Market/OI] scanSymbol error for ${symbol}:`, err?.message ?? err);
     return null;
   }
 }
@@ -175,48 +179,54 @@ export async function GET() {
     console.log('[Market/OI] GET /api/market/oi-signals called');
     const symbols = await getAllTickers();
     if (!symbols.length) {
-      console.error('[Market/OI] No symbols returned from BingX — cannot proceed with OI scan');
+      console.error('[Market/OI] No symbols from BingX');
       return NextResponse.json({ signals: [], scanned: 0, elapsed_ms: 0, error: 'No symbols from BingX' });
     }
 
     const start = Date.now();
-    // Limit to top symbols to avoid timeout — BingX has rate limits
-    const BATCH = 15;
-    const MAX_SYMBOLS = 100;
+    const BATCH_SIZE = 20;
+    const MAX_SYMBOLS = 150;
     const results: any[] = [];
     const symbolsToScan = symbols.slice(0, MAX_SYMBOLS);
 
-    console.log(`[Market/OI] Scanning ${symbolsToScan.length} symbols in batches of ${BATCH}`);
+    console.log(`[Market/OI] Scanning ${symbolsToScan.length} symbols in batches of ${BATCH_SIZE}`);
 
-    for (let i = 0; i < symbolsToScan.length; i += BATCH) {
-      const batch = symbolsToScan.slice(i, i + BATCH);
-      const batchResults = await Promise.allSettled(batch.map(checkSymbol));
+    for (let i = 0; i < symbolsToScan.length; i += BATCH_SIZE) {
+      const batch = symbolsToScan.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.allSettled(batch.map(scanSymbol));
       for (const r of batchResults) {
         if (r.status === 'fulfilled' && r.value) results.push(r.value);
         if (r.status === 'rejected') {
           console.error('[Market/OI] batch promise rejected:', r.reason);
         }
       }
-      // Small delay between batches to respect BingX rate limits
-      if (i + BATCH < symbolsToScan.length) {
-        await new Promise((resolve) => setTimeout(resolve, 200));
+      // Rate limit delay between batches (matches Python's time.sleep(0.15))
+      if (i + BATCH_SIZE < symbolsToScan.length) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
       }
     }
 
-    // Sort by OI value descending (largest OI first)
-    results.sort((a, b) => b.oi_now - a.oi_now);
+    // Sort by OI change % descending (largest anomaly first)
+    results.sort((a, b) => b.oi_change_pct - a.oi_change_pct);
 
     const elapsed = Date.now() - start;
-    console.log(`[Market/OI] Scan complete: ${results.length} signals found in ${elapsed}ms across ${symbolsToScan.length} symbols`);
+    const historySize = OI_HISTORY.size;
+    console.log(
+      `[Market/OI] Scan done: ${results.length} anomalies in ${elapsed}ms | history: ${historySize} symbols`
+    );
 
     return NextResponse.json({
-      signals: results.slice(0, 15),
+      signals: results.slice(0, 20),
       scanned: symbolsToScan.length,
       elapsed_ms: elapsed,
+      history_symbols: historySize,
       timestamp: new Date().toISOString(),
     });
   } catch (err: any) {
     console.error('[Market/OI] GET handler fatal error:', err?.message ?? err, err?.stack ?? '');
-    return NextResponse.json({ error: `Internal server error: ${err?.message ?? 'unknown'}` }, { status: 500 });
+    return NextResponse.json(
+      { error: `Internal server error: ${err?.message ?? 'unknown'}` },
+      { status: 500 }
+    );
   }
 }

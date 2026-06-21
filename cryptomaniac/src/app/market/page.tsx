@@ -17,10 +17,9 @@ interface MarketAnalysis {
 interface OISignal {
   symbol: string;
   period: string;
-  oi_growth_4h: number;
-  oi_growth_24h: number;
-  price_growth_4h: number;
-  price_growth_24h: number;
+  oi_change_pct: number;
+  price_change_pct: number;
+  price_oi_ratio: number;
   price_now: number;
   oi_now: number;
 }
@@ -449,8 +448,8 @@ export default function MarketPage() {
         <section className="mb-12">
           <SectionLabel
             index="03"
-            label="Open Interest Scanner"
-            badge={oiResult.data ? `${oiResult.data.length} signals` : undefined}
+            label="Open Interest Anomaly Scanner"
+            badge={oiResult.data ? `${oiResult.data.length} anomalies` : undefined}
             lastUpdated={oiResult.lastUpdated}
             loading={oiResult.loading}
             interval="3min"
@@ -458,24 +457,27 @@ export default function MarketPage() {
 
           <div className="border border-white/[0.07] bg-[#0d0d0d] overflow-hidden">
             {/* Table header */}
-            <div className="grid grid-cols-[1.4fr_0.7fr_0.9fr_0.9fr_0.9fr_0.8fr] gap-0 border-b border-white/[0.07] px-5 py-2.5">
-              {['Token', 'Period', 'Price 4h', 'Price 24h', 'Price', 'OI Value'].map((h) => (
+            <div className="grid grid-cols-[1.4fr_0.8fr_0.9fr_0.8fr_0.9fr] gap-0 border-b border-white/[0.07] px-5 py-2.5">
+              {['Token', 'OI Δ 1h', 'Price Δ 1h', 'P/OI Ratio', 'Price'].map((h) => (
                 <span key={h} className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/20">{h}</span>
               ))}
             </div>
 
             {oiResult.loading && !oiResult.data ? (
-              <SkeletonRows count={6} cols={6} />
+              <SkeletonRows count={6} cols={5} />
             ) : oiResult.error ? (
               <ErrorBanner message={oiResult.error} />
             ) : !oiResult.data?.length ? (
-              <div className="px-5 py-6 text-xs text-white/25 font-mono">No OI divergence signals found</div>
+              <div className="px-5 py-6 text-xs text-white/25 font-mono">
+                {(oiResult as any).history_symbols > 0
+                  ? 'No OI anomalies found — scanner accumulating history, check back in ~1 min' :'Accumulating OI history — anomalies appear after first scan cycle'}
+              </div>
             ) : (
               oiResult.data.map((sig, i) => {
                 return (
                   <div
                     key={sig.symbol}
-                    className={`grid grid-cols-[1.4fr_0.7fr_0.9fr_0.9fr_0.9fr_0.8fr] items-center gap-0 px-5 py-3 border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors ${
+                    className={`grid grid-cols-[1.4fr_0.8fr_0.9fr_0.8fr_0.9fr] items-center gap-0 px-5 py-3 border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors ${
                       i % 2 !== 0 ? 'bg-white/[0.01]' : ''
                     }`}
                   >
@@ -483,22 +485,17 @@ export default function MarketPage() {
                       <span className="text-[10px] font-mono text-white/20 w-4">{i + 1}</span>
                       <span className="text-xs font-mono font-semibold text-white/75">{cleanSymbol(sig.symbol)}</span>
                     </div>
-                    <span className={`text-[10px] font-bold uppercase tracking-[0.12em] px-1.5 py-0.5 w-fit ${
-                      sig.period === '4h' ? 'bg-amber-400/10 text-amber-400/80' : 'bg-blue-400/10 text-blue-400/80'
-                    }`}>
-                      {sig.period}
+                    <span className="text-xs font-mono font-semibold text-green-400/80 tabular-nums">
+                      +{sig.oi_change_pct.toFixed(2)}%
                     </span>
-                    <span className={`text-xs font-mono tabular-nums ${sig.price_growth_4h >= 0 ? 'text-green-400/70' : 'text-red-400/70'}`}>
-                      {fmtPct(sig.price_growth_4h)}
+                    <span className={`text-xs font-mono tabular-nums ${sig.price_change_pct >= 0 ? 'text-green-400/60' : 'text-red-400/60'}`}>
+                      {sig.price_change_pct >= 0 ? '+' : ''}{sig.price_change_pct.toFixed(2)}%
                     </span>
-                    <span className={`text-xs font-mono tabular-nums ${sig.price_growth_24h >= 0 ? 'text-green-400/70' : 'text-red-400/70'}`}>
-                      {fmtPct(sig.price_growth_24h)}
+                    <span className={`text-xs font-mono tabular-nums ${sig.price_oi_ratio < 0.4 ? 'text-amber-400/80' : 'text-white/40'}`}>
+                      {sig.price_oi_ratio.toFixed(3)}
                     </span>
                     <span className="text-[11px] font-mono text-white/50 tabular-nums">
                       ${fmtPrice(sig.price_now)}
-                    </span>
-                    <span className="text-[11px] font-mono text-white/30 tabular-nums">
-                      ${(sig.oi_now / 1e6).toFixed(1)}M
                     </span>
                   </div>
                 );
@@ -506,17 +503,15 @@ export default function MarketPage() {
             )}
 
             {/* Footer */}
-            {(oiResult.scanned || oiResult.elapsed_ms) ? (
-              <div className="px-5 py-2.5 border-t border-white/[0.04] flex items-center gap-4">
-                {oiResult.scanned ? (
-                  <span className="text-[9px] text-white/20 font-mono">scanned {oiResult.scanned} symbols</span>
-                ) : null}
-                {oiResult.elapsed_ms ? (
-                  <span className="text-[9px] text-white/20 font-mono">{(oiResult.elapsed_ms / 1000).toFixed(1)}s</span>
-                ) : null}
-                <span className="text-[9px] text-white/15 font-mono ml-auto">min OI ≥ $1M</span>
-              </div>
-            ) : null}
+            <div className="px-5 py-2.5 border-t border-white/[0.04] flex items-center gap-4">
+              {oiResult.scanned ? (
+                <span className="text-[9px] text-white/20 font-mono">scanned {oiResult.scanned} symbols</span>
+              ) : null}
+              {oiResult.elapsed_ms ? (
+                <span className="text-[9px] text-white/20 font-mono">{(oiResult.elapsed_ms / 1000).toFixed(1)}s</span>
+              ) : null}
+              <span className="text-[9px] text-white/15 font-mono ml-auto">OI Δ &gt; 5% · P/OI ratio &lt; 0.7</span>
+            </div>
           </div>
         </section>
 
@@ -528,8 +523,8 @@ export default function MarketPage() {
               {[
                 { label: 'Data Source', value: 'BingX Perpetual Swaps' },
                 { label: 'Funding Threshold', value: '≥ 0.1% (8h)' },
-                { label: 'OI Min Value', value: '≥ $1M' },
-                { label: 'Analysis Timeframe', value: '4h candles' },
+                { label: 'OI Change Threshold', value: '> 5% per hour' },
+                { label: 'Price/OI Ratio Max', value: '< 0.7' },
               ].map(({ label, value }) => (
                 <div key={label}>
                   <p className="text-[9px] text-white/20 uppercase tracking-[0.15em] mb-1">{label}</p>

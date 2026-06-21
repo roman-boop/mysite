@@ -1,5 +1,6 @@
 import React from 'react';
-import AppImage from '@/components/ui/AppImage';
+
+import Image from 'next/image';
 
 const STATS = [
 { value: '4+', label: 'Лет в трейдинге' },
@@ -15,12 +16,11 @@ export default function AboutSection() {
         {/* Image column */}
         <div className="relative group">
           <div className="aspect-[3/4] overflow-hidden bg-zinc-900 relative arch-image">
-            <AppImage
-              src="https://img.rocket.new/generatedImages/rocket_gen_img_1d38e1156-1765120170275.png"
-              alt="Trader analyzing cryptocurrency charts on multiple monitors in a dark trading room"
-              width={600}
-              height={800}
-              className="object-cover w-full h-full opacity-60 group-hover:opacity-80 group-hover:scale-105 transition-all duration-1000" />
+            <Image
+              src="/assets/images/image-1782043739335.png"
+              alt="crypto_maniac — алготрейдер и преподаватель"
+              fill
+              className="object-cover w-full h-full opacity-80 group-hover:opacity-100 group-hover:scale-105 transition-all duration-1000" />
             
             <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent opacity-80" />
             <div className="absolute bottom-8 left-8">
