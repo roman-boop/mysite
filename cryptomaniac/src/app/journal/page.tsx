@@ -105,6 +105,13 @@ export default function JournalPage() {
   // Clear confirm
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
+  // Screenshot state
+  // screenshots: { [entryId]: string (base64 data URL) }
+  const [screenshots, setScreenshots] = useState<Record<string, string>>({});
+  const [screenshotModal, setScreenshotModal] = useState<{ entryId: string; mode: 'upload' | 'view' } | null>(null);
+  const [uploadingScreenshot, setUploadingScreenshot] = useState(false);
+  const screenshotInputRef = useRef<HTMLInputElement>(null);
+
   // Close filter dropdown on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -120,7 +127,7 @@ export default function JournalPage() {
     if (!user) return;
     setLoadingData(true);
     try {
-      const [{ data: entriesData }, { data: modelsData }] = await Promise.all([
+      const [entriesResult, modelsResult, screenshotsResult] = await Promise.all([
         supabase
           .from('journal_entries')
           .select('*, trading_models(id, name, description, risk_management, stop_loss_targets, created_at)')
@@ -131,9 +138,23 @@ export default function JournalPage() {
           .select('*')
           .eq('user_id', user.id)
           .order('created_at', { ascending: false }),
+        supabase
+          .from('journal_screenshots')
+          .select('entry_id, screenshot_data')
+          .eq('user_id', user.id),
       ]);
+      const entriesData = entriesResult.data;
+      const modelsData = modelsResult.data;
+      const screenshotsData = screenshotsResult.data;
       setEntries((entriesData as JournalEntry[]) || []);
       setModels((modelsData as TradingModel[]) || []);
+      if (screenshotsData) {
+        const map: Record<string, string> = {};
+        (screenshotsData as { entry_id: string; screenshot_data: string }[]).forEach((s) => {
+          map[s.entry_id] = s.screenshot_data;
+        });
+        setScreenshots(map);
+      }
     } catch (err) {
       console.error('Failed to fetch journal data:', err);
     } finally {
@@ -145,6 +166,70 @@ export default function JournalPage() {
     if (user) fetchData();
     else setLoadingData(false);
   }, [user, fetchData]);
+
+  // Handle screenshot file selection
+  const handleScreenshotFile = async (file: File) => {
+    if (!user || !screenshotModal) return;
+    setUploadingScreenshot(true);
+    try {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const dataUrl = e.target?.result as string;
+        const entryId = screenshotModal.entryId;
+        // Upsert into journal_screenshots
+        const { error } = await supabase
+          .from('journal_screenshots')
+          .upsert(
+            { entry_id: entryId, user_id: user.id, screenshot_data: dataUrl, updated_at: new Date().toISOString() },
+            { onConflict: 'entry_id' }
+          );
+        if (!error) {
+          setScreenshots((prev) => ({ ...prev, [entryId]: dataUrl }));
+          setScreenshotModal({ entryId, mode: 'view' });
+        }
+        setUploadingScreenshot(false);
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      console.error('Failed to upload screenshot:', err);
+      setUploadingScreenshot(false);
+    }
+  };
+
+  const handleScreenshotDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0];
+    if (file && file.type.startsWith('image/')) handleScreenshotFile(file);
+  };
+
+  const handleScreenshotPaste = useCallback((e: ClipboardEvent) => {
+    if (!screenshotModal || screenshotModal.mode !== 'upload') return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith('image/')) {
+        const file = items[i].getAsFile();
+        if (file) handleScreenshotFile(file);
+        break;
+      }
+    }
+  }, [screenshotModal]);
+
+  useEffect(() => {
+    document.addEventListener('paste', handleScreenshotPaste);
+    return () => document.removeEventListener('paste', handleScreenshotPaste);
+  }, [handleScreenshotPaste]);
+
+  const handleDeleteScreenshot = async (entryId: string) => {
+    if (!user) return;
+    await supabase.from('journal_screenshots').delete().eq('entry_id', entryId).eq('user_id', user.id);
+    setScreenshots((prev) => {
+      const next = { ...prev };
+      delete next[entryId];
+      return next;
+    });
+    setScreenshotModal(null);
+  };
 
   // Filtered entries
   const filteredEntries = entries.filter((e) => {
@@ -464,6 +549,12 @@ export default function JournalPage() {
                     )}
                   </th>
                 ))}
+                {/* Screenshot column header */}
+                <th className="px-3 py-3 w-8 text-[10px] font-semibold uppercase tracking-[0.15em] text-white/40 whitespace-nowrap">
+                  <svg viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5 text-white/20 mx-auto">
+                    <path fillRule="evenodd" d="M4 5a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V7a2 2 0 00-2-2h-1.586a1 1 0 01-.707-.293l-1.121-1.121A2 2 0 0011.172 3H8.828a2 2 0 00-1.414.586L6.293 4.707A1 1 0 015.586 5H4zm6 9a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+                  </svg>
+                </th>
                 <th className="px-3 py-3 w-8" />
               </tr>
             </thead>
@@ -553,6 +644,8 @@ export default function JournalPage() {
                     className="w-full bg-transparent border-b border-white/10 text-white/80 text-xs px-1 py-0.5 outline-none placeholder-white/20 focus:border-amber-400/50"
                   />
                 </td>
+                {/* Empty screenshot cell for new row */}
+                <td className="px-2 py-2" />
                 <td className="px-2 py-2">
                   <button
                     onClick={handleAddRow}
@@ -567,11 +660,11 @@ export default function JournalPage() {
               {/* Data rows */}
               {loadingData ? (
                 <tr>
-                  <td colSpan={10} className="text-center py-12 text-white/30 text-xs">Загрузка...</td>
+                  <td colSpan={11} className="text-center py-12 text-white/30 text-xs">Загрузка...</td>
                 </tr>
               ) : filteredEntries.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="text-center py-12 text-white/20 text-xs tracking-widest uppercase">Нет записей</td>
+                  <td colSpan={11} className="text-center py-12 text-white/20 text-xs tracking-widest uppercase">Нет записей</td>
                 </tr>
               ) : (
                 filteredEntries.map((entry) => (
@@ -659,6 +752,30 @@ export default function JournalPage() {
                         <input autoFocus value={editValue} onChange={(e) => setEditValue(e.target.value)} onBlur={() => handleCellSave(entry, 'note')} onKeyDown={(e) => { if (e.key === 'Enter') handleCellSave(entry, 'note'); if (e.key === 'Escape') setEditingCell(null); }} className="w-full bg-transparent border-b border-amber-400/50 text-white text-xs px-1 py-0.5 outline-none" />
                       ) : (
                         <span className="text-white/50 truncate block">{entry.note || <span className="text-white/20">—</span>}</span>
+                      )}
+                    </td>
+                    {/* Screenshot button */}
+                    <td className="px-2 py-2">
+                      {screenshots[entry.id] ? (
+                        <button
+                          onClick={() => setScreenshotModal({ entryId: entry.id, mode: 'view' })}
+                          title="Открыть скриншот"
+                          className="w-6 h-6 flex items-center justify-center rounded-sm bg-amber-400/15 border border-amber-400/40 text-amber-400 hover:bg-amber-400/25 hover:border-amber-400/70 transition-all duration-200"
+                        >
+                          <svg viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3">
+                            <path fillRule="evenodd" d="M4 5a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V7a2 2 0 00-2-2h-1.586a1 1 0 01-.707-.293l-1.121-1.121A2 2 0 0011.172 3H8.828a2 2 0 00-1.414.586L6.293 4.707A1 1 0 015.586 5H4zm6 9a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+                          </svg>
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => setScreenshotModal({ entryId: entry.id, mode: 'upload' })}
+                          title="Добавить скриншот"
+                          className="w-6 h-6 flex items-center justify-center rounded-sm border border-white/10 text-white/20 hover:border-white/30 hover:text-white/50 opacity-0 group-hover:opacity-100 transition-all duration-200"
+                        >
+                          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3 h-3">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v8m-4-4h8M4 16h12a2 2 0 002-2V7a2 2 0 00-2-2h-1.586a1 1 0 01-.707-.293l-1.121-1.121A2 2 0 0011.172 3H8.828a2 2 0 00-1.414.586L6.293 4.707A1 1 0 015.586 5H4a2 2 0 00-2 2v7a2 2 0 002 2z" />
+                          </svg>
+                        </button>
                       )}
                     </td>
                     {/* delete */}
@@ -826,6 +943,107 @@ export default function JournalPage() {
             <div className="flex justify-center gap-3">
               <button onClick={() => setShowClearConfirm(false)} className="text-[10px] font-bold uppercase tracking-[0.2em] border border-white/20 text-white/60 px-5 py-2.5 hover:border-white/40 hover:text-white transition-all duration-300">Отмена</button>
               <button onClick={handleClearTable} className="text-[10px] font-bold uppercase tracking-[0.2em] bg-red-500 text-white px-5 py-2.5 hover:bg-red-400 transition-all duration-300">Очистить</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Screenshot Upload Modal */}
+      {screenshotModal?.mode === 'upload' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm px-4" onClick={() => setScreenshotModal(null)}>
+          <div className="bg-[#0f0f0f] border border-white/10 w-full max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
+              <div className="flex items-center gap-2.5">
+                <div className="w-6 h-6 flex items-center justify-center border border-amber-400/30 bg-amber-400/5">
+                  <svg viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5 text-amber-400">
+                    <path fillRule="evenodd" d="M4 5a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V7a2 2 0 00-2-2h-1.586a1 1 0 01-.707-.293l-1.121-1.121A2 2 0 0011.172 3H8.828a2 2 0 00-1.414.586L6.293 4.707A1 1 0 015.586 5H4zm6 9a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+                  </svg>
+                </div>
+                <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-white">Скриншот позиции</h2>
+              </div>
+              <button onClick={() => setScreenshotModal(null)} className="text-white/30 hover:text-white transition-colors text-lg leading-none">✕</button>
+            </div>
+
+            <div className="px-6 py-6">
+              {/* Drop zone */}
+              <div
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={handleScreenshotDrop}
+                onClick={() => screenshotInputRef.current?.click()}
+                className="relative border border-dashed border-white/15 hover:border-amber-400/40 bg-white/[0.02] hover:bg-amber-400/[0.03] transition-all duration-300 cursor-pointer group"
+                style={{ minHeight: 180 }}
+              >
+                <div className="flex flex-col items-center justify-center py-12 px-6 text-center">
+                  <div className="w-12 h-12 flex items-center justify-center border border-white/10 group-hover:border-amber-400/30 mb-4 transition-colors duration-300">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" className="w-6 h-6 text-white/20 group-hover:text-amber-400/50 transition-colors duration-300">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                  </div>
+                  <p className="text-white/50 text-xs font-medium mb-1">Перетащите изображение сюда</p>
+                  <p className="text-white/25 text-[11px]">или нажмите для выбора файла</p>
+                  <p className="text-white/20 text-[10px] mt-3 tracking-widest uppercase">Ctrl+V для вставки из буфера</p>
+                </div>
+                {uploadingScreenshot && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/60">
+                    <div className="w-5 h-5 border border-amber-400/30 border-t-amber-400 rounded-full animate-spin" />
+                  </div>
+                )}
+              </div>
+              <input
+                ref={screenshotInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) handleScreenshotFile(file);
+                }}
+              />
+            </div>
+
+            <div className="px-6 pb-5 flex justify-end">
+              <button onClick={() => setScreenshotModal(null)} className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/30 hover:text-white transition-colors px-4 py-2">Отмена</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Screenshot View Modal */}
+      {screenshotModal?.mode === 'view' && screenshots[screenshotModal.entryId] && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm px-4" onClick={() => setScreenshotModal(null)}>
+          <div className="relative w-full max-w-5xl" onClick={(e) => e.stopPropagation()}>
+            {/* Header bar */}
+            <div className="flex items-center justify-between px-4 py-3 bg-[#0f0f0f] border border-white/10 border-b-0">
+              <div className="flex items-center gap-2">
+                <div className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                <span className="text-[10px] font-semibold uppercase tracking-[0.25em] text-white/40">Скриншот позиции</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setScreenshotModal({ entryId: screenshotModal.entryId, mode: 'upload' })}
+                  className="text-[10px] font-bold uppercase tracking-[0.15em] text-white/30 hover:text-amber-400 transition-colors px-3 py-1.5 border border-white/10 hover:border-amber-400/30"
+                  title="Заменить скриншот"
+                >
+                  Заменить
+                </button>
+                <button
+                  onClick={() => handleDeleteScreenshot(screenshotModal.entryId)}
+                  className="text-[10px] font-bold uppercase tracking-[0.15em] text-red-400/50 hover:text-red-400 transition-colors px-3 py-1.5 border border-red-500/10 hover:border-red-500/30"
+                  title="Удалить скриншот"
+                >
+                  Удалить
+                </button>
+                <button onClick={() => setScreenshotModal(null)} className="text-white/30 hover:text-white transition-colors ml-1 text-lg leading-none">✕</button>
+              </div>
+            </div>
+            {/* Image */}
+            <div className="border border-white/10 bg-[#080808] flex items-center justify-center overflow-hidden" style={{ maxHeight: '80vh' }}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={screenshots[screenshotModal.entryId]}
+                alt="Скриншот позиции"
+                className="max-w-full max-h-[80vh] object-contain"
+              />
             </div>
           </div>
         </div>
