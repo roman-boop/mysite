@@ -176,16 +176,20 @@ export default function JournalPage() {
       reader.onload = async (e) => {
         const dataUrl = e.target?.result as string;
         const entryId = screenshotModal.entryId;
-        // Upsert into journal_screenshots
+        // Delete existing screenshot for this entry (if any), then insert new one
+        await supabase
+          .from('journal_screenshots')
+          .delete()
+          .eq('entry_id', entryId)
+          .eq('user_id', user.id);
         const { error } = await supabase
           .from('journal_screenshots')
-          .upsert(
-            { entry_id: entryId, user_id: user.id, screenshot_data: dataUrl, updated_at: new Date().toISOString() },
-            { onConflict: 'entry_id' }
-          );
+          .insert({ entry_id: entryId, user_id: user.id, screenshot_data: dataUrl, updated_at: new Date().toISOString() });
         if (!error) {
           setScreenshots((prev) => ({ ...prev, [entryId]: dataUrl }));
           setScreenshotModal({ entryId, mode: 'view' });
+        } else {
+          console.error('Failed to save screenshot:', error);
         }
         setUploadingScreenshot(false);
       };
