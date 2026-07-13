@@ -23,11 +23,12 @@ export default function LoginForm() {
     setLoading(true);
     try {
       await signIn(email, password);
+      // Small delay to ensure session cookie is set before navigation
+      await new Promise((resolve) => setTimeout(resolve, 150));
       router.push(redirect);
       router.refresh();
     } catch (err: any) {
       setError(err?.message || 'Invalid email or password.');
-    } finally {
       setLoading(false);
     }
   };
@@ -76,9 +77,17 @@ export default function LoginForm() {
           </div>
 
           <div>
-            <label className="block text-[11px] uppercase tracking-widest text-zinc-500 mb-2 font-semibold">
-              Пароль
-            </label>
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-[11px] uppercase tracking-widest text-zinc-500 font-semibold">
+                Пароль
+              </label>
+              <Link
+                href="/forgot-password"
+                className="text-[11px] text-zinc-500 hover:text-amber-400 transition-colors uppercase tracking-widest"
+              >
+                Забыли пароль?
+              </Link>
+            </div>
             <input
               type="password"
               value={password}

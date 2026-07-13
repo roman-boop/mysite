@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Header from '@/components/Header';
 import Footer from '@/components/Footer';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
@@ -39,6 +39,15 @@ interface ApiResult<T> {
   lastUpdated: Date | null;
   scanned?: number;
   elapsed_ms?: number;
+  cached?: boolean;
+  generated_at?: string;
+}
+
+// screenshot state per signal key (signalType:symbol)
+interface ScreenshotState {
+  url: string | null;
+  loading: boolean;
+  uploading: boolean;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -69,6 +78,10 @@ function fmtPrice(p: number): string {
   return p.toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
 
+function signalKey(signalType: string, symbol: string): string {
+  return `${signalType}:${symbol}`;
+}
+
 // ─── Custom Tooltip ───────────────────────────────────────────────────────────
 
 const CustomTooltip = ({ active, payload }: any) => {
@@ -87,10 +100,10 @@ const CustomTooltip = ({ active, payload }: any) => {
 // ─── Section Header ───────────────────────────────────────────────────────────
 
 function SectionLabel({
-  index, label, badge, lastUpdated, loading, interval,
+  index, label, badge, lastUpdated, loading, interval, generatedAt,
 }: {
   index: string; label: string; badge?: string;
-  lastUpdated: Date | null; loading: boolean; interval: string;
+  lastUpdated: Date | null; loading: boolean; interval: string; generatedAt?: string;
 }) {
   return (
     <div className="flex items-center gap-3 mb-4">
@@ -104,7 +117,12 @@ function SectionLabel({
       <div className="ml-auto flex items-center gap-3">
         <span className="text-[9px] text-white/20 font-mono">↻ {interval}</span>
         {loading && (
-          <span className="text-[9px] text-amber-400/60 font-mono animate-pulse">scanning…</span>
+          <span className="text-[9px] text-amber-400/60 font-mono animate-pulse">loading…</span>
+        )}
+        {!loading && generatedAt && (
+          <span className="text-[9px] text-white/20 font-mono" title="Server generation time">
+            gen {new Date(generatedAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+          </span>
         )}
         {!loading && lastUpdated && (
           <span className="text-[9px] text-white/20 font-mono">{fmtTime(lastUpdated)}</span>
@@ -141,6 +159,93 @@ function ErrorBanner({ message }: { message: string }) {
   );
 }
 
+// ─── Screenshot Button ────────────────────────────────────────────────────────
+
+function ScreenshotButton({
+  signalType,
+  symbol,
+  screenshotState,
+  onUpload,
+  onView,
+}: {
+  signalType: string;
+  symbol: string;
+  screenshotState: ScreenshotState | undefined;
+  onUpload: (signalType: string, symbol: string, file: File) => void;
+  onView: (url: string) => void;
+}) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const hasScreenshot = screenshotState?.url != null;
+  const isUploading = screenshotState?.uploading ?? false;
+
+  return (
+    <div className="flex items-center gap-1.5">
+      {hasScreenshot && (
+        <button
+          onClick={() => onView(screenshotState!.url!)}
+          title="View screenshot"
+          className="text-[9px] font-mono text-blue-400/70 hover:text-blue-400 border border-blue-400/20 hover:border-blue-400/50 px-1.5 py-0.5 transition-colors"
+        >
+          📷
+        </button>
+      )}
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        disabled={isUploading}
+        title={hasScreenshot ? 'Replace screenshot' : 'Attach screenshot'}
+        className={`text-[9px] font-mono border px-1.5 py-0.5 transition-colors ${
+          isUploading
+            ? 'text-white/20 border-white/10 cursor-not-allowed'
+            : hasScreenshot
+            ? 'text-white/30 hover:text-white/60 border-white/10 hover:border-white/25' :'text-white/40 hover:text-white/70 border-white/15 hover:border-white/35'
+        }`}
+      >
+        {isUploading ? '…' : hasScreenshot ? '↑' : '+'}
+      </button>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) onUpload(signalType, symbol, file);
+          e.target.value = '';
+        }}
+      />
+    </div>
+  );
+}
+
+// ─── Screenshot Viewer Modal ──────────────────────────────────────────────────
+
+function ScreenshotModal({ url, onClose }: { url: string; onClose: () => void }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="relative max-w-4xl max-h-[90vh] border border-white/10 bg-[#0d0d0d] p-2"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          onClick={onClose}
+          className="absolute top-2 right-2 text-white/40 hover:text-white/80 text-xs font-mono z-10 bg-[#0d0d0d] px-2 py-1"
+        >
+          ✕
+        </button>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={url}
+          alt="Signal screenshot"
+          className="max-w-full max-h-[85vh] object-contain"
+        />
+      </div>
+    </div>
+  );
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function MarketPage() {
@@ -154,16 +259,16 @@ export default function MarketPage() {
     data: null, loading: true, error: null, lastUpdated: null, scanned: 0, elapsed_ms: 0,
   });
 
+  // Screenshots: key = "signalType:symbol"
+  const [screenshots, setScreenshots] = useState<Record<string, ScreenshotState>>({});
+  const [viewingScreenshot, setViewingScreenshot] = useState<string | null>(null);
+
   const fetchAnalysis = useCallback(async () => {
     setAnalysis((p) => ({ ...p, loading: true, error: null }));
     try {
       const res = await fetch('/api/market/analysis');
       const json = await res.json();
-      if (!res.ok) {
-        const errMsg = json?.error || `HTTP ${res.status}`;
-        console.error('[Market] Analysis fetch error:', errMsg);
-        throw new Error(errMsg);
-      }
+      if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
       setAnalysis({ data: json, loading: false, error: null, lastUpdated: new Date() });
     } catch (e: any) {
       console.error('[Market] Analysis fetch error:', e);
@@ -176,11 +281,7 @@ export default function MarketPage() {
     try {
       const res = await fetch('/api/market/oi-signals');
       const json = await res.json();
-      if (!res.ok) {
-        const errMsg = json?.error || `HTTP ${res.status}`;
-        console.error('[Market] OI signals fetch error:', errMsg);
-        throw new Error(errMsg);
-      }
+      if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
       setOiResult({
         data: json.signals ?? [],
         loading: false,
@@ -188,6 +289,8 @@ export default function MarketPage() {
         lastUpdated: new Date(),
         scanned: json.scanned,
         elapsed_ms: json.elapsed_ms,
+        cached: json.cached,
+        generated_at: json.generated_at,
       });
     } catch (e: any) {
       console.error('[Market] OI signals fetch error:', e);
@@ -200,11 +303,7 @@ export default function MarketPage() {
     try {
       const res = await fetch('/api/market/funding-signals');
       const json = await res.json();
-      if (!res.ok) {
-        const errMsg = json?.error || `HTTP ${res.status}`;
-        console.error('[Market] Funding signals fetch error:', errMsg);
-        throw new Error(errMsg);
-      }
+      if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
       setFundingResult({
         data: json.signals ?? [],
         loading: false,
@@ -212,6 +311,8 @@ export default function MarketPage() {
         lastUpdated: new Date(),
         scanned: json.scanned,
         elapsed_ms: json.elapsed_ms,
+        cached: json.cached,
+        generated_at: json.generated_at,
       });
     } catch (e: any) {
       console.error('[Market] Funding signals fetch error:', e);
@@ -219,12 +320,23 @@ export default function MarketPage() {
     }
   }, []);
 
+  // Trigger server-side signal refresh every 10 minutes
+  const triggerRefresh = useCallback(async () => {
+    try {
+      await fetch('/api/market/refresh-signals');
+      // After refresh, reload cached data
+      await Promise.all([fetchOI(), fetchFunding()]);
+    } catch (e) {
+      console.error('[Market] Refresh trigger error:', e);
+    }
+  }, [fetchOI, fetchFunding]);
+
   // Initial fetch
   useEffect(() => {
     fetchAnalysis();
-    fetchOI();
-    fetchFunding();
-  }, [fetchAnalysis, fetchOI, fetchFunding]);
+    // On first load, trigger a refresh to populate cache, then fetch
+    triggerRefresh();
+  }, [fetchAnalysis, triggerRefresh]);
 
   // Auto-refresh intervals
   useEffect(() => {
@@ -232,15 +344,86 @@ export default function MarketPage() {
     return () => clearInterval(t);
   }, [fetchAnalysis]);
 
+  // Every 10 minutes: trigger server-side signal generation
   useEffect(() => {
-    const t = setInterval(fetchOI, 3 * 60 * 1000); // 3min
+    const t = setInterval(triggerRefresh, 10 * 60 * 1000); // 10min
     return () => clearInterval(t);
-  }, [fetchOI]);
+  }, [triggerRefresh]);
+
+  // Load screenshots for visible signals
+  const loadScreenshot = useCallback(async (signalType: string, symbol: string) => {
+    const key = signalKey(signalType, symbol);
+    setScreenshots((prev) => ({
+      ...prev,
+      [key]: { url: prev[key]?.url ?? null, loading: true, uploading: false },
+    }));
+    try {
+      const res = await fetch(`/api/market/signal-screenshot?signal_type=${signalType}&symbol=${encodeURIComponent(symbol)}`);
+      const json = await res.json();
+      setScreenshots((prev) => ({
+        ...prev,
+        [key]: { url: json.screenshot?.screenshot_url ?? null, loading: false, uploading: false },
+      }));
+    } catch {
+      setScreenshots((prev) => ({
+        ...prev,
+        [key]: { url: null, loading: false, uploading: false },
+      }));
+    }
+  }, []);
+
+  // Load screenshots when signals arrive
+  useEffect(() => {
+    if (!oiResult.data) return;
+    oiResult.data.forEach((sig) => {
+      const key = signalKey('oi', sig.symbol);
+      if (!(key in screenshots)) loadScreenshot('oi', sig.symbol);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [oiResult.data]);
 
   useEffect(() => {
-    const t = setInterval(fetchFunding, 5 * 60 * 1000); // 5min
-    return () => clearInterval(t);
-  }, [fetchFunding]);
+    if (!fundingResult.data) return;
+    fundingResult.data.forEach((sig) => {
+      const key = signalKey('funding', sig.symbol);
+      if (!(key in screenshots)) loadScreenshot('funding', sig.symbol);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fundingResult.data]);
+
+  // Upload screenshot: convert to base64 data URL and save
+  const handleUpload = useCallback(async (signalType: string, symbol: string, file: File) => {
+    const key = signalKey(signalType, symbol);
+    setScreenshots((prev) => ({
+      ...prev,
+      [key]: { url: prev[key]?.url ?? null, loading: false, uploading: true },
+    }));
+    try {
+      // Convert file to base64 data URL (stored directly, no external storage needed)
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const res = await fetch('/api/market/signal-screenshot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ signal_type: signalType, symbol, screenshot_url: dataUrl }),
+      });
+      const json = await res.json();
+      setScreenshots((prev) => ({
+        ...prev,
+        [key]: { url: json.screenshot?.screenshot_url ?? null, loading: false, uploading: false },
+      }));
+    } catch {
+      setScreenshots((prev) => ({
+        ...prev,
+        [key]: { url: prev[key]?.url ?? null, loading: false, uploading: false },
+      }));
+    }
+  }, []);
 
   // Chart data
   const probs = analysis.data?.probabilities;
@@ -265,12 +448,16 @@ export default function MarketPage() {
     <div className="min-h-screen bg-[#0a0a0a] text-white">
       <Header />
 
+      {viewingScreenshot && (
+        <ScreenshotModal url={viewingScreenshot} onClose={() => setViewingScreenshot(null)} />
+      )}
+
       <main className="max-w-7xl mx-auto px-6 md:px-12 pt-32 pb-24">
         {/* Page title */}
         <div className="mb-12">
           <p className="text-[10px] font-semibold uppercase tracking-[0.3em] text-white/25 mb-2">Analytics · BingX</p>
           <h1 className="text-3xl md:text-4xl font-display font-medium tracking-tight">Market</h1>
-          <p className="text-xs text-white/25 mt-2 font-mono">Powered by BingX Perpetual Swaps API</p>
+          <p className="text-xs text-white/25 mt-2 font-mono">Powered by BingX Perpetual Swaps API · Signals cached every 10 min</p>
         </div>
 
         {/* ── Section 1: Market Analyzer ── */}
@@ -382,14 +569,15 @@ export default function MarketPage() {
             badge={fundingResult.data ? `${fundingResult.data.length} signals` : undefined}
             lastUpdated={fundingResult.lastUpdated}
             loading={fundingResult.loading}
-            interval="5min"
+            interval="10min"
+            generatedAt={fundingResult.generated_at}
           />
 
           <div className="border border-white/[0.07] bg-[#0d0d0d] overflow-hidden">
             {/* Table header */}
-            <div className="grid grid-cols-[1.4fr_0.9fr_0.7fr_1fr] gap-0 border-b border-white/[0.07] px-5 py-2.5">
-              {['Token', 'Funding Rate', 'Signal', 'Mark Price'].map((h) => (
-                <span key={h} className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/20">{h}</span>
+            <div className="grid grid-cols-[1.4fr_0.9fr_0.7fr_1fr_auto] gap-0 border-b border-white/[0.07] px-5 py-2.5">
+              {['Token', 'Funding Rate', 'Signal', 'Mark Price', ''].map((h, i) => (
+                <span key={i} className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/20">{h}</span>
               ))}
             </div>
 
@@ -398,14 +586,18 @@ export default function MarketPage() {
             ) : fundingResult.error ? (
               <ErrorBanner message={fundingResult.error} />
             ) : !fundingResult.data?.length ? (
-              <div className="px-5 py-6 text-xs text-white/25 font-mono">No funding rates above threshold (0.1%)</div>
+              <div className="px-5 py-6 text-xs text-white/25 font-mono">
+                {(fundingResult as any).cached === false
+                  ? 'Signals are being generated… refresh in a moment' :'No funding rates above threshold (0.1%)'}
+              </div>
             ) : (
               fundingResult.data.map((sig, i) => {
                 const isLong = sig.direction === 'LONG';
+                const key = signalKey('funding', sig.symbol);
                 return (
                   <div
                     key={sig.symbol}
-                    className={`grid grid-cols-[1.4fr_0.9fr_0.7fr_1fr] items-center gap-0 px-5 py-3 border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors ${
+                    className={`grid grid-cols-[1.4fr_0.9fr_0.7fr_1fr_auto] items-center gap-0 px-5 py-3 border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors ${
                       i % 2 !== 0 ? 'bg-white/[0.01]' : ''
                     }`}
                   >
@@ -424,6 +616,15 @@ export default function MarketPage() {
                     <span className="text-[11px] font-mono text-white/35 tabular-nums">
                       ${fmtPrice(sig.mark_price)}
                     </span>
+                    <div className="flex justify-end pr-1">
+                      <ScreenshotButton
+                        signalType="funding"
+                        symbol={sig.symbol}
+                        screenshotState={screenshots[key]}
+                        onUpload={handleUpload}
+                        onView={setViewingScreenshot}
+                      />
+                    </div>
                   </div>
                 );
               })
@@ -438,6 +639,9 @@ export default function MarketPage() {
                 {fundingResult.elapsed_ms ? (
                   <span className="text-[9px] text-white/20 font-mono">{(fundingResult.elapsed_ms / 1000).toFixed(1)}s</span>
                 ) : null}
+                {fundingResult.cached && (
+                  <span className="text-[9px] text-white/15 font-mono">cached</span>
+                )}
                 <span className="text-[9px] text-white/15 font-mono ml-auto">threshold ≥ 0.1%</span>
               </div>
             ) : null}
@@ -452,14 +656,15 @@ export default function MarketPage() {
             badge={oiResult.data ? `${oiResult.data.length} anomalies` : undefined}
             lastUpdated={oiResult.lastUpdated}
             loading={oiResult.loading}
-            interval="3min"
+            interval="10min"
+            generatedAt={oiResult.generated_at}
           />
 
           <div className="border border-white/[0.07] bg-[#0d0d0d] overflow-hidden">
             {/* Table header */}
-            <div className="grid grid-cols-[1.4fr_0.8fr_0.9fr_0.8fr_0.9fr] gap-0 border-b border-white/[0.07] px-5 py-2.5">
-              {['Token', 'OI Δ 1h', 'Price Δ 1h', 'P/OI Ratio', 'Price'].map((h) => (
-                <span key={h} className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/20">{h}</span>
+            <div className="grid grid-cols-[1.4fr_0.8fr_0.9fr_0.8fr_0.9fr_auto] gap-0 border-b border-white/[0.07] px-5 py-2.5">
+              {['Token', 'OI Δ 1h', 'Price Δ 1h', 'P/OI Ratio', 'Price', ''].map((h, i) => (
+                <span key={i} className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/20">{h}</span>
               ))}
             </div>
 
@@ -469,15 +674,16 @@ export default function MarketPage() {
               <ErrorBanner message={oiResult.error} />
             ) : !oiResult.data?.length ? (
               <div className="px-5 py-6 text-xs text-white/25 font-mono">
-                {(oiResult as any).history_symbols > 0
-                  ? 'No OI anomalies found — scanner accumulating history, check back in ~1 min' :'Accumulating OI history — anomalies appear after first scan cycle'}
+                {(oiResult as any).cached === false
+                  ? 'Signals are being generated… refresh in a moment' :'No OI anomalies found — scanner accumulating history, check back in ~1 min'}
               </div>
             ) : (
               oiResult.data.map((sig, i) => {
+                const key = signalKey('oi', sig.symbol);
                 return (
                   <div
                     key={sig.symbol}
-                    className={`grid grid-cols-[1.4fr_0.8fr_0.9fr_0.8fr_0.9fr] items-center gap-0 px-5 py-3 border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors ${
+                    className={`grid grid-cols-[1.4fr_0.8fr_0.9fr_0.8fr_0.9fr_auto] items-center gap-0 px-5 py-3 border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors ${
                       i % 2 !== 0 ? 'bg-white/[0.01]' : ''
                     }`}
                   >
@@ -497,6 +703,15 @@ export default function MarketPage() {
                     <span className="text-[11px] font-mono text-white/50 tabular-nums">
                       ${fmtPrice(sig.price_now)}
                     </span>
+                    <div className="flex justify-end pr-1">
+                      <ScreenshotButton
+                        signalType="oi"
+                        symbol={sig.symbol}
+                        screenshotState={screenshots[key]}
+                        onUpload={handleUpload}
+                        onView={setViewingScreenshot}
+                      />
+                    </div>
                   </div>
                 );
               })
@@ -510,6 +725,9 @@ export default function MarketPage() {
               {oiResult.elapsed_ms ? (
                 <span className="text-[9px] text-white/20 font-mono">{(oiResult.elapsed_ms / 1000).toFixed(1)}s</span>
               ) : null}
+              {oiResult.cached && (
+                <span className="text-[9px] text-white/15 font-mono">cached</span>
+              )}
               <span className="text-[9px] text-white/15 font-mono ml-auto">OI Δ &gt; 5% · P/OI ratio &lt; 0.7</span>
             </div>
           </div>
@@ -524,7 +742,7 @@ export default function MarketPage() {
                 { label: 'Data Source', value: 'BingX Perpetual Swaps' },
                 { label: 'Funding Threshold', value: '≥ 0.1% (8h)' },
                 { label: 'OI Change Threshold', value: '> 5% per hour' },
-                { label: 'Price/OI Ratio Max', value: '< 0.7' },
+                { label: 'Cache Interval', value: 'Every 10 minutes' },
               ].map(({ label, value }) => (
                 <div key={label}>
                   <p className="text-[9px] text-white/20 uppercase tracking-[0.15em] mb-1">{label}</p>
